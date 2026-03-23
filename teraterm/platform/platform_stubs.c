@@ -12,6 +12,7 @@
 #include "platform_macos_types.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 /* --- Registry stubs (Tera Term uses INI files, registry rarely used) --- */
 
@@ -217,7 +218,6 @@ BOOL CreateDirectoryW(LPCWSTR lpPathName, void* lpSecurityAttributes) {
     return mkdir(path, 0755) == 0 ? TRUE : FALSE;
 }
 
-#include <sys/stat.h>
 BOOL PathFileExistsW(LPCWSTR pszPath) {
     if (!pszPath) return FALSE;
     char path[1024];
