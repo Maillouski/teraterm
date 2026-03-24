@@ -87,6 +87,8 @@ char* tt_mac_open_file_dialog(TTMacWindow parent, const char* filter, const char
 char* tt_mac_save_file_dialog(TTMacWindow parent, const char* filter, const char* initial_dir);
 
 /* Terminal view extended API */
+struct termbuf;
+typedef struct termbuf termbuf_t;
 termbuf_t *tt_mac_termview_get_termbuf(TTMacView view);
 void tt_mac_termview_clear_selection(TTMacView view);
 void tt_mac_termview_select_all(TTMacView view);
