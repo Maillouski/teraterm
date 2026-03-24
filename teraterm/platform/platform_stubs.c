@@ -539,4 +539,92 @@ BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString) {
     return TRUE;
 }
 
+void PostQuitMessage(int nExitCode) {
+    (void)nExitCode;
+    /* TODO: Bridge to macOS application quit */
+}
+
+BOOL IsDBCSLeadByte(BYTE TestChar) {
+    (void)TestChar;
+    return FALSE; /* macOS uses UTF-8, no DBCS lead bytes */
+}
+
+HINSTANCE ShellExecuteW(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
+    LPCWSTR lpParameters, LPCWSTR lpDirectory, int nShowCmd) {
+    (void)hwnd; (void)lpOperation; (void)lpParameters; (void)lpDirectory; (void)nShowCmd;
+    if (lpFile) {
+        /* Convert wide string to UTF-8 and open with system handler */
+        char url[2048];
+        wcstombs(url, lpFile, sizeof(url));
+        char cmd[2200];
+        snprintf(cmd, sizeof(cmd), "open '%s'", url);
+        system(cmd);
+    }
+    return (HINSTANCE)(intptr_t)33; /* >32 means success */
+}
+
+/* --- File handle operations --- */
+HANDLE CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+    void *lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes,
+    HANDLE hTemplateFile) {
+    (void)lpSecurityAttributes; (void)dwFlagsAndAttributes; (void)hTemplateFile;
+    if (!lpFileName) return INVALID_HANDLE_VALUE;
+    char path[1024];
+    wcstombs(path, lpFileName, sizeof(path));
+    const char *mode = "r";
+    if (dwDesiredAccess & 0x40000000L) { /* GENERIC_WRITE */
+        mode = (dwCreationDisposition == 2) ? "w" : "a"; /* CREATE_ALWAYS or OPEN_EXISTING */
+    }
+    FILE *fp = fopen(path, mode);
+    return fp ? (HANDLE)fp : INVALID_HANDLE_VALUE;
+}
+
+BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+    LPDWORD lpNumberOfBytesWritten, void *lpOverlapped) {
+    (void)lpOverlapped;
+    if (!hFile || hFile == INVALID_HANDLE_VALUE) return FALSE;
+    size_t written = fwrite(lpBuffer, 1, nNumberOfBytesToWrite, (FILE*)hFile);
+    if (lpNumberOfBytesWritten) *lpNumberOfBytesWritten = (DWORD)written;
+    return (written > 0) ? TRUE : FALSE;
+}
+
+BOOL CloseHandle(HANDLE hObject) {
+    if (!hObject || hObject == INVALID_HANDLE_VALUE) return FALSE;
+    fclose((FILE*)hObject);
+    return TRUE;
+}
+
+DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) {
+    (void)hHandle; (void)dwMilliseconds;
+    return 0; /* WAIT_OBJECT_0 */
+}
+
+BOOL DeleteFileW(LPCWSTR lpFileName) {
+    if (!lpFileName) return FALSE;
+    char path[1024];
+    wcstombs(path, lpFileName, sizeof(path));
+    return (remove(path) == 0) ? TRUE : FALSE;
+}
+
+/* --- Dialog functions --- */
+HWND CreateDialogW(HINSTANCE hInstance, LPCWSTR lpTemplateName, HWND hWndParent, DLGPROC lpDialogFunc) {
+    (void)hInstance; (void)lpTemplateName; (void)hWndParent; (void)lpDialogFunc;
+    return NULL;
+}
+
+INT_PTR DialogBoxW(HINSTANCE hInstance, LPCWSTR lpTemplateName, HWND hWndParent, DLGPROC lpDialogFunc) {
+    (void)hInstance; (void)lpTemplateName; (void)hWndParent; (void)lpDialogFunc;
+    return 0;
+}
+
+BOOL EndDialog(HWND hDlg, INT_PTR nResult) {
+    (void)hDlg; (void)nResult;
+    return TRUE;
+}
+
+BOOL MessageBeep(UINT uType) {
+    (void)uType;
+    return TRUE;
+}
+
 #endif /* __APPLE__ || __linux__ */

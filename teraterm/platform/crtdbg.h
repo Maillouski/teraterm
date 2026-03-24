@@ -55,4 +55,7 @@
   #ifndef _CRTDBG_LEAK_CHECK_DF
     #define _CRTDBG_LEAK_CHECK_DF   0x20
   #endif
+  #ifndef _CrtCheckMemory
+    #define _CrtCheckMemory()       ((void)0)
+  #endif
 #endif
