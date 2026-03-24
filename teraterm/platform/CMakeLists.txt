@@ -23,6 +23,8 @@ if(APPLE)
     macos/macos_pty.c
     macos/macos_termbuf.h
     macos/macos_termbuf.c
+    macos/macos_connection.h
+    macos/macos_connection.c
   )
 
   target_include_directories(
