@@ -8,10 +8,92 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "macos_window.h"
+#include "macos_termbuf.h"
 #include "macos_connection.h"
 #include "macos_serial.h"
 #include "macos_net.h"
+#include <time.h>
+
+/* ===================================================================
+ * Session Logger
+ * =================================================================== */
+
+@interface TTSessionLogger : NSObject
+@property (nonatomic, assign) FILE *logFile;
+@property (nonatomic, copy) NSString *logPath;
+@property (nonatomic, assign) BOOL paused;
+@property (nonatomic, assign) BOOL addTimestamps;
+@property (nonatomic, assign) BOOL needTimestamp;
+@end
+
+@implementation TTSessionLogger
+
+- (void)dealloc {
+    [self stop];
+}
+
+- (BOOL)startWithPath:(NSString *)path append:(BOOL)append timestamps:(BOOL)ts {
+    if (_logFile) [self stop];
+    _logFile = fopen(path.UTF8String, append ? "ab" : "wb");
+    if (!_logFile) return NO;
+    _logPath = path;
+    _paused = NO;
+    _addTimestamps = ts;
+    _needTimestamp = ts;
+
+    /* Write header */
+    time_t now = time(NULL);
+    char buf[128];
+    strftime(buf, sizeof(buf), "[Log started: %Y-%m-%d %H:%M:%S]\n", localtime(&now));
+    fwrite(buf, 1, strlen(buf), _logFile);
+    fflush(_logFile);
+    return YES;
+}
+
+- (void)stop {
+    if (_logFile) {
+        time_t now = time(NULL);
+        char buf[128];
+        strftime(buf, sizeof(buf), "\n[Log stopped: %Y-%m-%d %H:%M:%S]\n", localtime(&now));
+        fwrite(buf, 1, strlen(buf), _logFile);
+        fclose(_logFile);
+        _logFile = NULL;
+    }
+    _logPath = nil;
+}
+
+- (void)writeData:(const char *)data length:(int)len {
+    if (!_logFile || _paused || !data || len <= 0) return;
+    if (_addTimestamps) {
+        for (int i = 0; i < len; i++) {
+            if (_needTimestamp) {
+                time_t now = time(NULL);
+                char ts[32];
+                strftime(ts, sizeof(ts), "[%H:%M:%S] ", localtime(&now));
+                fwrite(ts, 1, strlen(ts), _logFile);
+                _needTimestamp = NO;
+            }
+            fputc(data[i], _logFile);
+            if (data[i] == '\n') _needTimestamp = YES;
+        }
+    } else {
+        fwrite(data, 1, len, _logFile);
+    }
+    fflush(_logFile);
+}
+
+- (void)addComment:(NSString *)comment {
+    if (!_logFile) return;
+    time_t now = time(NULL);
+    char ts[32];
+    strftime(ts, sizeof(ts), "[%H:%M:%S] ", localtime(&now));
+    fprintf(_logFile, "\n%s[Comment: %s]\n", ts, comment.UTF8String);
+    fflush(_logFile);
+}
+
+@end
 
 /* ===================================================================
  * New Connection Dialog
@@ -231,6 +313,12 @@
 @property (nonatomic, strong) NSTimer *readTimer;
 @property (nonatomic, strong) NSTextField *statusField;
 @property (nonatomic, weak) TTMacAppDelegate *appDelegate;
+@property (nonatomic, strong) TTSessionLogger *logger;
+/* Settings */
+@property (nonatomic, copy) NSString *fontFamily;
+@property (nonatomic, assign) int fontSize;
+@property (nonatomic, assign) int termCols;
+@property (nonatomic, assign) int termRows;
 @end
 
 @implementation TTTerminalSession
@@ -241,6 +329,10 @@
         _window = NULL;
         _termView = NULL;
         _connection = NULL;
+        _fontFamily = @"Menlo";
+        _fontSize = 14;
+        _termCols = 80;
+        _termRows = 24;
     }
     return self;
 }
@@ -291,6 +383,27 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
     }
 }
 
+static void session_title_callback(const char *title, void *ctx) {
+    TTTerminalSession *session = (__bridge TTTerminalSession *)ctx;
+    if (title && session.window) {
+        NSString *t = [NSString stringWithFormat:@"Tera Term - %s", title];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            tt_mac_window_set_title(session.window, t.UTF8String);
+        });
+    }
+}
+
+static void session_bell_callback(void *ctx) {
+    NSBeep();
+}
+
+static void session_log_callback(const char *data, int len, void *ctx) {
+    TTTerminalSession *session = (__bridge TTTerminalSession *)ctx;
+    if (session.logger) {
+        [session.logger writeData:data length:len];
+    }
+}
+
 - (void)connectWith:(TTMacConnection)conn {
     if (!conn) return;
     self.connection = conn;
@@ -298,6 +411,14 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
     /* Set up keyboard → connection output path */
     tt_mac_termview_set_output_cb(self.termView, connection_output_callback,
                                    (__bridge void *)self);
+
+    /* Set up title, bell, and log callbacks on termbuf */
+    termbuf_t *tb = tt_mac_termview_get_termbuf(self.termView);
+    if (tb) {
+        termbuf_set_title_cb(tb, session_title_callback, (__bridge void *)self);
+        termbuf_set_bell_cb(tb, session_bell_callback, (__bridge void *)self);
+        termbuf_set_log_cb(tb, session_log_callback, (__bridge void *)self);
+    }
 
     /* Update window title and status */
     const char *desc = tt_conn_get_description(conn);
@@ -473,9 +594,12 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
                         action:@selector(disconnectSession:)
                  keyEquivalent:@"d"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Send Break"
-                        action:@selector(sendBreak:)
-                 keyEquivalent:@"b"];
+    [fileMenu addItemWithTitle:@"Send File..."
+                        action:@selector(sendFile:)
+                 keyEquivalent:@""];
+    [fileMenu addItemWithTitle:@"Receive File..."
+                        action:@selector(receiveFile:)
+                 keyEquivalent:@""];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Log..."
                         action:@selector(startLog:)
@@ -496,9 +620,26 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
     [editMenu addItemWithTitle:@"Paste"
                         action:@selector(paste:)
                  keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:@"Paste with CR"
+                        action:@selector(pasteCR:)
+                 keyEquivalent:@""];
+    [editMenu addItem:[NSMenuItem separatorItem]];
     [editMenu addItemWithTitle:@"Select All"
                         action:@selector(selectAll:)
                  keyEquivalent:@"a"];
+    [editMenu addItemWithTitle:@"Select Screen"
+                        action:@selector(selectScreen:)
+                 keyEquivalent:@""];
+    [editMenu addItemWithTitle:@"Cancel Selection"
+                        action:@selector(cancelSelection:)
+                 keyEquivalent:@""];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Clear Screen"
+                        action:@selector(clearScreen:)
+                 keyEquivalent:@""];
+    [editMenu addItemWithTitle:@"Clear Buffer"
+                        action:@selector(clearBuffer:)
+                 keyEquivalent:@""];
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
@@ -514,8 +655,37 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
     [setupMenu addItemWithTitle:@"Font..."
                          action:@selector(setupFont:)
                   keyEquivalent:@""];
+    [setupMenu addItem:[NSMenuItem separatorItem]];
+    [setupMenu addItemWithTitle:@"Save Setup..."
+                         action:@selector(saveSetup:)
+                  keyEquivalent:@""];
+    [setupMenu addItemWithTitle:@"Restore Setup..."
+                         action:@selector(restoreSetup:)
+                  keyEquivalent:@""];
     setupMenuItem.submenu = setupMenu;
     [mainMenu addItem:setupMenuItem];
+
+    /* Control menu */
+    NSMenuItem *controlMenuItem = [[NSMenuItem alloc] init];
+    NSMenu *controlMenu = [[NSMenu alloc] initWithTitle:@"Control"];
+    [controlMenu addItemWithTitle:@"Reset Terminal"
+                           action:@selector(resetTerminal:)
+                    keyEquivalent:@""];
+    [controlMenu addItemWithTitle:@"Reset Remote Title"
+                           action:@selector(resetRemoteTitle:)
+                    keyEquivalent:@""];
+    [controlMenu addItem:[NSMenuItem separatorItem]];
+    [controlMenu addItemWithTitle:@"Are You There"
+                           action:@selector(areYouThere:)
+                    keyEquivalent:@""];
+    [controlMenu addItemWithTitle:@"Send Break"
+                           action:@selector(sendBreak:)
+                    keyEquivalent:@"b"];
+    [controlMenu addItemWithTitle:@"Reset Port"
+                           action:@selector(resetPort:)
+                    keyEquivalent:@""];
+    controlMenuItem.submenu = controlMenu;
+    [mainMenu addItem:controlMenuItem];
 
     /* Help menu */
     NSMenuItem *helpMenuItem = [[NSMenuItem alloc] init];
@@ -553,19 +723,315 @@ static void connection_output_callback(const char *data, int len, void *ctx) {
 }
 
 - (void)startLog:(id)sender {
-    /* TODO: Implement logging */
+    if (self.session.logger && self.session.logger.logFile) {
+        /* Already logging — offer to stop */
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Logging is active";
+        alert.informativeText = [NSString stringWithFormat:@"Log file: %@", self.session.logger.logPath];
+        [alert addButtonWithTitle:@"Stop Log"];
+        [alert addButtonWithTitle:@"Pause/Resume"];
+        [alert addButtonWithTitle:@"Add Comment"];
+        [alert addButtonWithTitle:@"Cancel"];
+        NSModalResponse resp = [alert runModal];
+        if (resp == NSAlertFirstButtonReturn) {
+            [self.session.logger stop];
+            self.session.logger = nil;
+            [self.session updateStatus:@"Logging stopped"];
+        } else if (resp == NSAlertSecondButtonReturn) {
+            self.session.logger.paused = !self.session.logger.paused;
+            [self.session updateStatus:self.session.logger.paused ? @"Log paused" : @"Logging"];
+        } else if (resp == NSAlertThirdButtonReturn) {
+            NSAlert *ca = [[NSAlert alloc] init];
+            ca.messageText = @"Add Comment to Log";
+            NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+            ca.accessoryView = input;
+            [ca addButtonWithTitle:@"OK"];
+            [ca addButtonWithTitle:@"Cancel"];
+            if ([ca runModal] == NSAlertFirstButtonReturn) {
+                [self.session.logger addComment:input.stringValue];
+            }
+        }
+        return;
+    }
+
+    /* Start new log */
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.nameFieldStringValue = @"teraterm.log";
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"log"]];
+
+    if ([panel runModal] == NSModalResponseOK) {
+        self.session.logger = [[TTSessionLogger alloc] init];
+        BOOL ok = [self.session.logger startWithPath:panel.URL.path append:NO timestamps:YES];
+        if (ok) {
+            [self.session updateStatus:[NSString stringWithFormat:@"Logging to %@",
+                                        panel.URL.lastPathComponent]];
+        } else {
+            tt_mac_messagebox(self.session.window, "Failed to open log file.", "Error", 0);
+            self.session.logger = nil;
+        }
+    }
 }
 
-- (void)setupTerminal:(id)sender { /* TODO */ }
-- (void)setupSerial:(id)sender { /* TODO */ }
-- (void)setupFont:(id)sender { /* TODO */ }
-- (void)showHelp:(id)sender { /* TODO */ }
+- (void)setupTerminal:(id)sender {
+    NSAlert *dialog = [[NSAlert alloc] init];
+    dialog.messageText = @"Terminal Setup";
+
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 130)];
+
+    [self addLabel:@"Columns:" at:NSMakePoint(10, 100) to:view];
+    NSTextField *colsField = [[NSTextField alloc] initWithFrame:NSMakeRect(120, 98, 60, 24)];
+    colsField.intValue = self.session.termCols;
+    [view addSubview:colsField];
+
+    [self addLabel:@"Rows:" at:NSMakePoint(10, 70) to:view];
+    NSTextField *rowsField = [[NSTextField alloc] initWithFrame:NSMakeRect(120, 68, 60, 24)];
+    rowsField.intValue = self.session.termRows;
+    [view addSubview:rowsField];
+
+    [self addLabel:@"Scrollback:" at:NSMakePoint(10, 40) to:view];
+    NSTextField *sbField = [[NSTextField alloc] initWithFrame:NSMakeRect(120, 38, 80, 24)];
+    sbField.intValue = 10000;
+    [view addSubview:sbField];
+
+    dialog.accessoryView = view;
+    [dialog addButtonWithTitle:@"OK"];
+    [dialog addButtonWithTitle:@"Cancel"];
+
+    if ([dialog runModal] == NSAlertFirstButtonReturn) {
+        int newCols = colsField.intValue;
+        int newRows = rowsField.intValue;
+        if (newCols >= 10 && newCols <= 500 && newRows >= 5 && newRows <= 200) {
+            self.session.termCols = newCols;
+            self.session.termRows = newRows;
+            termbuf_t *tb = tt_mac_termview_get_termbuf(self.session.termView);
+            if (tb) {
+                termbuf_resize(tb, newCols, newRows);
+                termbuf_set_scrollback_size(tb, sbField.intValue);
+            }
+            tt_mac_termview_invalidate(self.session.termView);
+        }
+    }
+}
+
+- (void)addLabel:(NSString *)text at:(NSPoint)pt to:(NSView *)view {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.frame = NSMakeRect(pt.x, pt.y, 100, 18);
+    label.alignment = NSTextAlignmentRight;
+    [view addSubview:label];
+}
+
+- (void)setupSerial:(id)sender {
+    /* Show current serial parameters if connected, or let user change defaults */
+    NSAlert *dialog = [[NSAlert alloc] init];
+    dialog.messageText = @"Serial Port Setup";
+
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 100)];
+
+    [self addLabel:@"Baud Rate:" at:NSMakePoint(10, 70) to:view];
+    NSPopUpButton *baudPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 68, 150, 26) pullsDown:NO];
+    for (NSString *b in @[@"9600", @"19200", @"38400", @"57600", @"115200", @"230400", @"460800", @"921600"])
+        [baudPopup addItemWithTitle:b];
+    [baudPopup selectItemWithTitle:@"9600"];
+    [view addSubview:baudPopup];
+
+    [self addLabel:@"Flow Control:" at:NSMakePoint(10, 35) to:view];
+    NSPopUpButton *flowPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 33, 150, 26) pullsDown:NO];
+    [flowPopup addItemWithTitle:@"None"];
+    [flowPopup addItemWithTitle:@"XON/XOFF"];
+    [flowPopup addItemWithTitle:@"RTS/CTS"];
+    [view addSubview:flowPopup];
+
+    dialog.accessoryView = view;
+    [dialog addButtonWithTitle:@"OK"];
+    [dialog addButtonWithTitle:@"Cancel"];
+    [dialog runModal];
+}
+
+- (void)setupFont:(id)sender {
+    NSFontManager *fm = [NSFontManager sharedFontManager];
+    NSFont *current = [NSFont fontWithName:self.session.fontFamily size:self.session.fontSize];
+    if (!current) current = [NSFont monospacedSystemFontOfSize:14 weight:NSFontWeightRegular];
+    [fm setSelectedFont:current isMultiple:NO];
+    [fm orderFrontFontPanel:self];
+}
+
+- (void)changeFont:(id)sender {
+    NSFont *newFont = [sender convertFont:[NSFont fontWithName:self.session.fontFamily
+                                                          size:self.session.fontSize]];
+    if (newFont) {
+        self.session.fontFamily = newFont.familyName;
+        self.session.fontSize = (int)newFont.pointSize;
+        tt_mac_termview_set_font(self.session.termView,
+                                  newFont.familyName.UTF8String,
+                                  (int)newFont.pointSize, 0, 0);
+    }
+}
+
+- (void)showHelp:(id)sender {
+    NSURL *url = [NSURL URLWithString:@"https://teratermproject.github.io/"];
+    [[NSWorkspace sharedWorkspace] openURL:url];
+}
+
+/* --- Edit menu actions --- */
+
+- (void)pasteCR:(id)sender {
+    char *text = tt_mac_clipboard_get_text();
+    if (text && self.session.connection) {
+        /* Append CR to each line */
+        for (char *p = text; *p; p++) {
+            char ch = *p;
+            if (ch == '\n') {
+                const char cr = '\r';
+                tt_conn_write(self.session.connection, &cr, 1);
+            }
+            tt_conn_write(self.session.connection, &ch, 1);
+        }
+        tt_mac_clipboard_free(text);
+    }
+}
+
+- (void)selectScreen:(id)sender {
+    tt_mac_termview_select_all(self.session.termView);
+}
+
+- (void)cancelSelection:(id)sender {
+    tt_mac_termview_clear_selection(self.session.termView);
+}
+
+- (void)clearScreen:(id)sender {
+    termbuf_t *tb = tt_mac_termview_get_termbuf(self.session.termView);
+    if (tb) termbuf_clear_screen(tb);
+    tt_mac_termview_invalidate(self.session.termView);
+}
+
+- (void)clearBuffer:(id)sender {
+    termbuf_t *tb = tt_mac_termview_get_termbuf(self.session.termView);
+    if (tb) termbuf_clear_buffer(tb);
+    tt_mac_termview_invalidate(self.session.termView);
+}
+
+/* --- Control menu actions --- */
+
+- (void)resetTerminal:(id)sender {
+    termbuf_t *tb = tt_mac_termview_get_termbuf(self.session.termView);
+    if (tb) termbuf_reset(tb);
+    tt_mac_window_set_title(self.session.window, "Tera Term");
+    tt_mac_termview_invalidate(self.session.termView);
+}
+
+- (void)resetRemoteTitle:(id)sender {
+    tt_mac_window_set_title(self.session.window, "Tera Term");
+}
+
+- (void)areYouThere:(id)sender {
+    if (self.session.connection) {
+        /* Telnet AYT: IAC AYT */
+        const unsigned char ayt[] = { 0xFF, 0xF6 };
+        tt_conn_write(self.session.connection, ayt, 2);
+    }
+}
+
+- (void)resetPort:(id)sender {
+    if (self.session.connection) {
+        [self.session disconnect];
+        /* Small delay then reconnect dialog */
+        [self performSelector:@selector(showNewConnectionDialog) withObject:nil afterDelay:0.2];
+    }
+}
+
+/* --- File transfer actions (basic send/receive) --- */
+
+- (void)sendFile:(id)sender {
+    if (!self.session.connection) return;
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+
+    if ([panel runModal] == NSModalResponseOK) {
+        NSData *data = [NSData dataWithContentsOfURL:panel.URL];
+        if (data) {
+            /* Send raw file data in chunks */
+            const char *bytes = data.bytes;
+            NSUInteger remaining = data.length;
+            NSUInteger offset = 0;
+            while (remaining > 0) {
+                int chunk = (remaining > 4096) ? 4096 : (int)remaining;
+                tt_conn_write(self.session.connection, bytes + offset, chunk);
+                offset += chunk;
+                remaining -= chunk;
+            }
+            [self.session updateStatus:[NSString stringWithFormat:@"Sent %lu bytes",
+                                        (unsigned long)data.length]];
+        }
+    }
+}
+
+- (void)receiveFile:(id)sender {
+    /* For raw receive, we just enable logging to a file temporarily */
+    tt_mac_messagebox(self.session.window,
+        "Use File > Log to capture received data to a file.\n"
+        "For protocol transfers (XMODEM/ZMODEM), use the appropriate protocol command from the remote host.",
+        "Receive File", 0);
+}
+
+/* --- Setup save/restore --- */
+
+- (void)saveSetup:(id)sender {
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.nameFieldStringValue = @"teraterm.ini";
+    if ([panel runModal] == NSModalResponseOK) {
+        /* Write basic INI-style config */
+        NSMutableString *ini = [NSMutableString string];
+        [ini appendString:@"[Tera Term]\n"];
+        [ini appendFormat:@"TerminalCols=%d\n", self.session.termCols];
+        [ini appendFormat:@"TerminalRows=%d\n", self.session.termRows];
+        [ini appendFormat:@"FontFamily=%@\n", self.session.fontFamily];
+        [ini appendFormat:@"FontSize=%d\n", self.session.fontSize];
+        [ini writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [self.session updateStatus:@"Setup saved"];
+    }
+}
+
+- (void)restoreSetup:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    if ([panel runModal] == NSModalResponseOK) {
+        NSString *content = [NSString stringWithContentsOfURL:panel.URL encoding:NSUTF8StringEncoding error:nil];
+        if (content) {
+            for (NSString *line in [content componentsSeparatedByString:@"\n"]) {
+                NSArray *parts = [line componentsSeparatedByString:@"="];
+                if (parts.count != 2) continue;
+                NSString *key = [parts[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                NSString *val = [parts[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if ([key isEqualToString:@"TerminalCols"]) self.session.termCols = val.intValue;
+                else if ([key isEqualToString:@"TerminalRows"]) self.session.termRows = val.intValue;
+                else if ([key isEqualToString:@"FontFamily"]) self.session.fontFamily = val;
+                else if ([key isEqualToString:@"FontSize"]) self.session.fontSize = val.intValue;
+            }
+            /* Apply settings */
+            termbuf_t *tb = tt_mac_termview_get_termbuf(self.session.termView);
+            if (tb) termbuf_resize(tb, self.session.termCols, self.session.termRows);
+            tt_mac_termview_set_font(self.session.termView,
+                                      self.session.fontFamily.UTF8String,
+                                      self.session.fontSize, 0, 0);
+            tt_mac_termview_invalidate(self.session.termView);
+            [self.session updateStatus:@"Setup restored"];
+        }
+    }
+}
 
 /* --- Validate menu items --- */
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
-    if (menuItem.action == @selector(disconnectSession:) ||
-        menuItem.action == @selector(sendBreak:)) {
-        return (self.session.connection != NULL);
+    SEL action = menuItem.action;
+    BOOL connected = (self.session.connection != NULL);
+
+    if (action == @selector(disconnectSession:) ||
+        action == @selector(sendBreak:) ||
+        action == @selector(areYouThere:) ||
+        action == @selector(resetPort:) ||
+        action == @selector(sendFile:)) {
+        return connected;
     }
     return YES;
 }

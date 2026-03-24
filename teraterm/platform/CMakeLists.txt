@@ -44,6 +44,7 @@ if(APPLE)
     "-framework CoreFoundation"
     "-framework IOKit"
     "-framework Security"
+    "-framework UniformTypeIdentifiers"
   )
 
   target_compile_options(
