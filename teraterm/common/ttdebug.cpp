@@ -26,6 +26,8 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if defined(_WIN32) || defined(_WIN64)
+
 #include <windows.h>
 #include <stdio.h>
 #include <imagehlp.h>
@@ -379,3 +381,29 @@ void DebugSetException(void)
 	// Cランタイム無効なパラメータエラーハンドラ
 	_set_invalid_parameter_handler(InvalidParameterHandler);
 }
+
+#else /* !_WIN32 && !_WIN64 — macOS / Linux stubs */
+
+#include <windows.h>
+#include <stdio.h>
+#include <signal.h>
+
+#include "ttdebug.h"
+
+HWND DebugConsoleOpen(void)
+{
+	/* No console allocation needed on POSIX */
+	return NULL;
+}
+
+void DebugSetException(void)
+{
+	/* No Windows exception handler on POSIX */
+}
+
+void DebugTestCrash(void)
+{
+	raise(SIGTRAP);
+}
+
+#endif /* _WIN32 || _WIN64 */

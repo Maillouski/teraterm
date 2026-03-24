@@ -55,9 +55,9 @@ typedef unsigned char uint8_t;
 static void *LoadRawFile(FILE *fp, size_t *_len, BOOL terminate)
 {
     fseek(fp, 0L, SEEK_END);
-	fpos_t pos;
-	fgetpos(fp, &pos);
+	long pos = ftell(fp);
     fseek(fp, 0L, SEEK_SET);
+	if (pos < 0) return NULL;
 	size_t len = (size_t)pos;
 	size_t alloc_len = terminate ? len + 3 : len;
 	char *buf = (char *)malloc(alloc_len);

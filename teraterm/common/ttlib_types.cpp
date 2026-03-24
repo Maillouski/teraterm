@@ -55,8 +55,22 @@ wchar_t *GetFileDir(const TTTSet *pts)
 		free(dir);
 	}
 
-	// Windowsのデフォルトのダウンロードフォルダを返す
+	// デフォルトのダウンロードフォルダを返す
+#if defined(_WIN32) || defined(_WIN64)
 	_SHGetKnownFolderPath(FOLDERID_Downloads, KF_FLAG_CREATE, NULL, &dir);
+#else
+	// macOS/Linux: use ~/Downloads
+	const char *home = getenv("HOME");
+	if (home) {
+		char path[1024];
+		snprintf(path, sizeof(path), "%s/Downloads", home);
+		size_t wlen = mbstowcs(NULL, path, 0) + 1;
+		dir = (wchar_t *)malloc(wlen * sizeof(wchar_t));
+		if (dir) mbstowcs(dir, path, wlen);
+	} else {
+		dir = _wcsdup(L"/tmp");
+	}
+#endif
 	return dir;
 }
 

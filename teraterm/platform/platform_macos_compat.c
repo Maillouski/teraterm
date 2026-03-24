@@ -5,8 +5,11 @@
  * macOS implementation of basic Windows API compatibility functions.
  */
 
+#define _DEFAULT_SOURCE  /* for usleep on Linux */
+
 #include "platform_macos_types.h"
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <wctype.h>
@@ -22,7 +25,10 @@ DWORD GetTickCount(void)
 
 void Sleep(DWORD dwMilliseconds)
 {
-    usleep(dwMilliseconds * 1000);
+    struct timespec ts;
+    ts.tv_sec = dwMilliseconds / 1000;
+    ts.tv_nsec = (dwMilliseconds % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 }
 
 DWORD GetLastError(void)
@@ -37,9 +43,13 @@ void SetLastError(DWORD dwErrCode)
 
 DWORD GetCurrentThreadId(void)
 {
+#if defined(__APPLE__)
     uint64_t tid;
     pthread_threadid_np(NULL, &tid);
     return (DWORD)tid;
+#else
+    return (DWORD)pthread_self();
+#endif
 }
 
 DWORD GetCurrentProcessId(void)

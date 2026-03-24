@@ -41,6 +41,8 @@
 #define _Printf_format_string_
 #endif
 
+/* On POSIX systems (macOS, Linux), vasprintf/asprintf are provided by libc */
+#if defined(_MSC_VER)
 /**
  *	領域を確保して、文字列をフォーマットして、ポインタ返す
  *	不要になったら free() すること
@@ -81,6 +83,7 @@ int vasprintf(char **strp, const char *fmt, va_list ap)
 		return len;
 	}
 }
+#endif /* _MSC_VER */
 
 /**
  *	領域を確保して、文字列をフォーマットして、ポインタ返す
@@ -124,6 +127,7 @@ int vaswprintf(wchar_t **strp, const wchar_t *fmt, va_list ap)
 	}
 }
 
+#if defined(_MSC_VER)
 /**
  *	領域を確保して、文字列をフォーマットして、ポインタ返す
  *	不要になったら free() すること
@@ -139,6 +143,7 @@ int asprintf(char **strp, _Printf_format_string_ const char *fmt, ...)
 	va_end(ap);
 	return r;
 }
+#endif /* _MSC_VER */
 
 /**
  *	領域を確保して、文字列をフォーマットして、ポインタ返す

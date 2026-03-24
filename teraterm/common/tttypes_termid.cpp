@@ -30,6 +30,10 @@
 #include <string.h>
 #include <assert.h>
 
+#ifndef _countof
+#define _countof(arr) (sizeof(arr) / sizeof((arr)[0]))
+#endif
+
 #include "tttypes_termid.h"
 
 const static TermIDList TermIDLists[] = {
