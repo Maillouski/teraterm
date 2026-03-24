@@ -54,6 +54,8 @@ typedef LONG                LSTATUS;
 typedef int                 errno_t;
 typedef void*               PVOID;
 
+typedef BOOL*               PBOOL;
+
 /* --- Pointer types --- */
 typedef char*               LPSTR;
 typedef char*               PCHAR;
@@ -110,6 +112,7 @@ typedef void*               HMONITOR;
 #define PASCAL
 #define CDECL
 #define __stdcall
+#define _stdcall
 #define __cdecl
 #define __fastcall
 #define DECLSPEC_IMPORT
@@ -447,6 +450,27 @@ typedef struct _DEVPROPKEY {
 /* --- File attribute constants --- */
 #define INVALID_FILE_ATTRIBUTES ((DWORD)-1)
 #define FILE_ATTRIBUTE_DIRECTORY 0x00000010
+#define FILE_ATTRIBUTE_NORMAL   0x00000080
+#define FILE_SHARE_READ         0x00000001
+#define FILE_SHARE_WRITE        0x00000002
+#define GENERIC_READ            0x80000000L
+#define GENERIC_WRITE           0x40000000L
+#define CREATE_ALWAYS           2
+#define OPEN_EXISTING           3
+#define INFINITE                0xFFFFFFFF
+
+/* --- Dialog constants --- */
+#define IDOK                1
+#define IDCANCEL            2
+#define IDYES               6
+#define IDNO                7
+#define MB_OK               0x00000000L
+#define MB_OKCANCEL         0x00000001L
+#define MB_YESNO            0x00000004L
+#define MB_ICONEXCLAMATION  0x00000030L
+#define MB_ICONINFORMATION  0x00000040L
+#define MB_ICONQUESTION     0x00000020L
+#define MAKEINTRESOURCE(i)  ((LPCSTR)(ULONG_PTR)(WORD)(i))
 
 /* --- Secure string macros --- */
 #ifndef _TRUNCATE
@@ -460,6 +484,64 @@ typedef struct _DEVPROPKEY {
 #ifndef _wcsdup
 #define _wcsdup wcsdup
 #endif
+
+/* --- Secure string functions --- */
+#include <limits.h>
+#ifndef strncpy_s
+static inline int strncpy_s_impl(char *dest, size_t destsz, const char *src, size_t count) {
+    if (!dest || destsz == 0) return -1;
+    if (!src) { dest[0] = '\0'; return -1; }
+    size_t to_copy = (count == (size_t)-1) ? destsz - 1 : ((count < destsz - 1) ? count : destsz - 1);
+    size_t i;
+    for (i = 0; i < to_copy && src[i] != '\0'; i++) dest[i] = src[i];
+    dest[i] = '\0';
+    return 0;
+}
+#define strncpy_s(dest, destsz, src, count) strncpy_s_impl(dest, destsz, src, count)
+#endif
+#ifndef strncat_s
+static inline int strncat_s_impl(char *dest, size_t destsz, const char *src, size_t count) {
+    if (!dest || destsz == 0) return -1;
+    size_t dlen = strlen(dest);
+    if (dlen >= destsz) return -1;
+    size_t remaining = destsz - dlen - 1;
+    size_t to_copy = (count == (size_t)-1) ? remaining : ((count < remaining) ? count : remaining);
+    size_t i;
+    for (i = 0; i < to_copy && src[i] != '\0'; i++) dest[dlen + i] = src[i];
+    dest[dlen + i] = '\0';
+    return 0;
+}
+#define strncat_s(dest, destsz, src, count) strncat_s_impl(dest, destsz, src, count)
+#endif
+#ifndef _snprintf_s
+#define _snprintf_s(buf, sz, trunc, ...) snprintf(buf, sz, __VA_ARGS__)
+#endif
+
+/* --- Locale-specific CRT functions --- */
+#include <locale.h>
+#if defined(__APPLE__)
+  #include <xlocale.h>
+  #ifndef _locale_t
+  typedef locale_t _locale_t;
+  #endif
+  static inline _locale_t _create_locale(int category, const char *locale_name) {
+      (void)category;
+      return newlocale(LC_ALL_MASK, locale_name, (locale_t)0);
+  }
+  static inline void _free_locale(_locale_t locale) {
+      if (locale) freelocale(locale);
+  }
+#else
+  /* Linux: locale_t requires _GNU_SOURCE; provide simple stub */
+  typedef void* _locale_t;
+  static inline _locale_t _create_locale(int category, const char *locale_name) {
+      (void)category; (void)locale_name;
+      return NULL;
+  }
+  static inline void _free_locale(_locale_t locale) { (void)locale; }
+#endif
+/* _snprintf_s_l: locale-aware snprintf - just use snprintf on POSIX */
+#define _snprintf_s_l(buf, sz, trunc, fmt, loc, ...) snprintf(buf, sz, fmt, ##__VA_ARGS__)
 
 /* --- File API compatibility --- */
 #define MAX_PATH          260
@@ -679,6 +761,31 @@ int GetDeviceCaps(HDC hdc, int index);
 
 BOOL SetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPCWSTR lpString);
 BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString);
+void PostQuitMessage(int nExitCode);
+BOOL UpdateWindow(HWND hWnd);
+BOOL IsDBCSLeadByte(BYTE TestChar);
+HINSTANCE ShellExecuteW(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
+    LPCWSTR lpParameters, LPCWSTR lpDirectory, int nShowCmd);
+int StartPage(HDC hdc);
+int EndPage(HDC hdc);
+
+/* File handle operations */
+HANDLE CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+    void *lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes,
+    HANDLE hTemplateFile);
+BOOL WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+    LPDWORD lpNumberOfBytesWritten, void *lpOverlapped);
+BOOL CloseHandle(HANDLE hObject);
+DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);
+BOOL DeleteFileW(LPCWSTR lpFileName);
+
+/* Dialog functions */
+HWND CreateDialogW(HINSTANCE hInstance, LPCWSTR lpTemplateName, HWND hWndParent, DLGPROC lpDialogFunc);
+#define CreateDialog CreateDialogW
+INT_PTR DialogBoxW(HINSTANCE hInstance, LPCWSTR lpTemplateName, HWND hWndParent, DLGPROC lpDialogFunc);
+BOOL EndDialog(HWND hDlg, INT_PTR nResult);
+BOOL DestroyWindow(HWND hWnd);
+BOOL MessageBeep(UINT uType);
 
 /* Forward declarations for platform-specific functions */
 void* dlopen_wide(const wchar_t* name);
