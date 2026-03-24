@@ -593,10 +593,21 @@ void tt_mac_window_set_topmost(TTMacWindow win, int topmost) {
 /* --- Terminal View --- */
 
 TTMacView tt_mac_termview_create(TTMacWindow win) {
+    return tt_mac_termview_create_inset(win, 0, 0, 0, 0);
+}
+
+TTMacView tt_mac_termview_create_inset(TTMacWindow win, int top, int bottom, int left, int right) {
     if (!win) return NULL;
     @autoreleasepool {
         NSWindow* window = (__bridge NSWindow*)win;
-        TTTerminalView* view = [[TTTerminalView alloc] initWithFrame:window.contentView.bounds];
+        NSRect contentBounds = window.contentView.bounds;
+        /* Cocoa coords: y=0 is bottom. Inset top reduces height from the top. */
+        NSRect frame = NSMakeRect(
+            contentBounds.origin.x + left,
+            contentBounds.origin.y + bottom,
+            contentBounds.size.width - left - right,
+            contentBounds.size.height - top - bottom);
+        TTTerminalView* view = [[TTTerminalView alloc] initWithFrame:frame];
         view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [window.contentView addSubview:view];
         return (__bridge_retained void*)view;

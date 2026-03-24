@@ -33,6 +33,7 @@ void tt_mac_window_set_topmost(TTMacWindow window, int topmost);
 
 /* Terminal view */
 TTMacView tt_mac_termview_create(TTMacWindow window);
+TTMacView tt_mac_termview_create_inset(TTMacWindow window, int top, int bottom, int left, int right);
 void tt_mac_termview_set_font(TTMacView view, const char* family, int size, int bold, int italic);
 void tt_mac_termview_set_colors(TTMacView view, unsigned int fg, unsigned int bg);
 void tt_mac_termview_invalidate(TTMacView view);
