@@ -163,10 +163,10 @@ static void TelWriteLog1(BYTE b)
 	else
 		Ch = Ch + 0x37;
 	Temp[2] = Ch;
-	win16_lwrite(tr.LogFile, Temp, 3);
+	win16_lwrite(tr.LogFile, (const char *)Temp, 3);
 }
 
-static void TelWriteLog(PCHAR Buf, int C)
+static void TelWriteLog(const BYTE *Buf, int C)
 {
 	int i;
 
@@ -182,7 +182,7 @@ static void SendBack(BYTE a, BYTE b)
 	Str3[0] = IAC;
 	Str3[1] = a;
 	Str3[2] = b;
-	CommRawOut(&cv, Str3, 3);
+	CommRawOut(&cv, (PCHAR)Str3, 3);
 	if (tr.LogFile)
 		TelWriteLog(Str3, 3);
 }
@@ -221,7 +221,7 @@ static void SendWinSize(void)
 	TmpBuff[i++] = IAC;
 	TmpBuff[i++] = SE;
 
-	CommRawOut(&cv, TmpBuff, i);
+	CommRawOut(&cv, (PCHAR)TmpBuff, i);
 	if (tr.LogFile)
 		TelWriteLog(TmpBuff, i);
 }
@@ -267,7 +267,7 @@ static void ParseTelIAC(BYTE b)
 
 static void ParseTelSB(BYTE b)
 {
-	BYTE TmpStr[51];
+	char TmpStr[51];
 	int i;
 
 	if (tr.SubOptIAC) {
@@ -291,7 +291,7 @@ static void ParseTelSB(BYTE b)
 					CommRawOut(&cv, TmpStr, i);
 
 					if (tr.LogFile)
-						TelWriteLog(TmpStr, i);
+						TelWriteLog((const BYTE *)TmpStr, i);
 				}
 				break;
 
@@ -313,7 +313,7 @@ static void ParseTelSB(BYTE b)
 					CommRawOut(&cv, TmpStr, i);
 
 					if (tr.LogFile)
-						TelWriteLog(TmpStr, i);
+						TelWriteLog((const BYTE *)TmpStr, i);
 				}
 				break;
 			}
@@ -782,6 +782,9 @@ void TelEnableMyOpt(BYTE b)
 	}
 }
 
+#ifdef __GNUC__
+__attribute__((unused))
+#endif
 static void TelDisableMyOpt(BYTE b)
 {
 	if (b <= MaxTelOpt) {
@@ -824,7 +827,7 @@ void TelSendAYT(void)
 
 	Str[0] = IAC;
 	Str[1] = AYT;
-	CommRawOut(&cv, Str, 2);
+	CommRawOut(&cv, (PCHAR)Str, 2);
 	CommSend(&cv);
 	if (tr.LogFile)
 		TelWriteLog(Str, 2);
@@ -836,7 +839,7 @@ void TelSendBreak(void)
 
 	Str[0] = IAC;
 	Str[1] = BREAK;
-	CommRawOut(&cv, Str, 2);
+	CommRawOut(&cv, (PCHAR)Str, 2);
 	CommSend(&cv);
 	if (tr.LogFile)
 		TelWriteLog(Str, 2);
@@ -856,7 +859,7 @@ static void TelSendNOP(void)
 
 	Str[0] = IAC;
 	Str[1] = NOP;
-	CommRawOut(&cv, Str, 2);
+	CommRawOut(&cv, (PCHAR)Str, 2);
 	CommSend(&cv);
 	if (tr.LogFile)
 		TelWriteLog(Str, 2);

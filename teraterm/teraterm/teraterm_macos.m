@@ -338,27 +338,26 @@
 }
 
 - (void)createWindowWithTitle:(NSString *)title cols:(int)cols rows:(int)rows {
+    static const CGFloat kStatusBarHeight = 20;
+
     TTMacFont font = tt_mac_font_create("Menlo", 14, 0, 0);
     int charWidth = 0, charHeight = 0, ascent = 0;
     tt_mac_font_get_metrics(font, &charWidth, &charHeight, &ascent);
     tt_mac_font_destroy(font);
 
-    int width = cols * charWidth + 20;
-    /* Extra 24px for status bar at bottom */
-    int height = rows * charHeight + 20 + 24;
+    /* Window content = exact terminal grid + status bar */
+    int width = cols * charWidth;
+    int height = rows * charHeight + (int)kStatusBarHeight;
 
     self.window = tt_mac_window_create(100, 100, width, height, [title UTF8String]);
 
-    /* Create the terminal view (fills window minus status bar) */
-    self.termView = tt_mac_termview_create(self.window);
-    tt_mac_termview_set_font(self.termView, "Menlo", 14, 0, 0);
-    tt_mac_termview_set_colors(self.termView, 0x00FFFFFF, 0x00000000);
-
-    /* Status bar at bottom of window */
     NSWindow *nsWin = (__bridge NSWindow *)self.window;
     NSRect contentBounds = nsWin.contentView.bounds;
+
+    /* Status bar at top of window (Cocoa coords: y increases upward) */
     self.statusField = [[NSTextField alloc] initWithFrame:
-        NSMakeRect(0, contentBounds.size.height - 22, contentBounds.size.width, 20)];
+        NSMakeRect(0, contentBounds.size.height - kStatusBarHeight,
+                   contentBounds.size.width, kStatusBarHeight)];
     self.statusField.editable = NO;
     self.statusField.bordered = NO;
     self.statusField.drawsBackground = YES;
@@ -368,6 +367,12 @@
     self.statusField.stringValue = @"Not connected";
     self.statusField.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [nsWin.contentView addSubview:self.statusField];
+
+    /* Terminal view fills content area below status bar */
+    self.termView = tt_mac_termview_create_inset(self.window,
+        (int)kStatusBarHeight, 0, 0, 0);
+    tt_mac_termview_set_font(self.termView, "Menlo", 14, 0, 0);
+    tt_mac_termview_set_colors(self.termView, 0x00FFFFFF, 0x00000000);
 }
 
 - (void)updateStatus:(NSString *)status {

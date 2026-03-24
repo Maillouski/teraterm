@@ -776,7 +776,6 @@ static void ProcessLF(void)
  */
 static void PutU32NoLog(unsigned int code)
 {
-	int LineEnd;
 	TCharAttr CharAttrTmp;
 	BOOL dec_special;
 	int r;
@@ -844,10 +843,7 @@ static void PutU32NoLog(unsigned int code)
 		CharAttrTmp.Attr |= CharAttr.Attr;
 	}
 
-	if (CursorX > CursorRightM)
-		LineEnd = NumOfColumns - 1;
-	else
-		LineEnd = CursorRightM;
+	/* LineEnd removed - was only used in commented-out code below */
 
 	// Wrap処理、カーソル移動
 	if (Wrap) {
@@ -4412,7 +4408,7 @@ static int toHexStr(unsigned char *buff, int buffsize, unsigned char *str)
 	int len, i, copylen = 0;
 	unsigned char c;
 
-	len = strlen(str);
+	len = strlen((const char *)str);
 
 	if (buffsize < len*2) {
 		return -1;
@@ -4446,19 +4442,19 @@ static int TermcapString(unsigned char *buff, int buffsize, unsigned char *capna
 	int len = 0, l;
 	unsigned char *capval = NULL;
 
-	if (strcmp(capname, "Co") == 0 || strcmp(capname, "colors") == 0) {
+	if (strcmp((const char *)capname, "Co") == 0 || strcmp((const char *)capname, "colors") == 0) {
 		if ((ts.ColorFlag & CF_ANSICOLOR) == 0) {
 			return 0;
 		}
 
 		if (ts.ColorFlag & CF_XTERM256) {
-			capval = "256";
+			capval = (unsigned char *)"256";
 		}
 		else if (ts.ColorFlag & CF_FULLCOLOR) {
-			capval = "16";
+			capval = (unsigned char *)"16";
 		}
 		else {
-			capval = "8";
+			capval = (unsigned char *)"8";
 		}
 	}
 
@@ -4550,7 +4546,7 @@ static void RequestTermcapString(unsigned char *StrBuff, int StrLen)	// xterm ex
 	if (replen == 3) {
 		RepStr[0] = '0';
 	}
-	SendDCSstr(RepStr, replen);
+	SendDCSstr((char *)RepStr, replen);
 }
 
 static void ParseDCS(BYTE Cmd, unsigned char *StrBuff, int len) {
@@ -4569,7 +4565,7 @@ static void ParseDCS(BYTE Cmd, unsigned char *StrBuff, int len) {
 						}
 					}
 					if (len == 8 && i == 8) {
-						strncpy_s(ts.TerminalUID, sizeof(ts.TerminalUID), StrBuff, _TRUNCATE);
+						strncpy_s(ts.TerminalUID, sizeof(ts.TerminalUID), (const char *)StrBuff, _TRUNCATE);
 					}
 				}
 			}
@@ -4683,7 +4679,7 @@ static void DCUserKey(BYTE b)
 	static int utf8_stat = 0;
 
 	if ((ESCFlag && (b=='\\')) || (b==ST && ts.KanjiCode!=IdSJIS && utf8_stat == 0)) {
-		if (! WaitKeyId) DefineUserKey(NewKeyId,NewKeyStr,NewKeyLen);
+		if (! WaitKeyId) DefineUserKey(NewKeyId,(PCHAR)NewKeyStr,NewKeyLen);
 		ESCFlag = FALSE;
 		ParseMode = ModeFirst;
 		return;
@@ -4710,7 +4706,7 @@ static void DCUserKey(BYTE b)
 	}
 	else {
 		if (b==0x3B) {
-			DefineUserKey(NewKeyId,NewKeyStr,NewKeyLen);
+			DefineUserKey(NewKeyId,(PCHAR)NewKeyStr,NewKeyLen);
 			WaitKeyId = TRUE;
 			NewKeyId = 0;
 		}
@@ -5028,7 +5024,7 @@ static void XsProcClipboard(PCHAR buff)
 			cbbuff[len] = 0;
 
 			// cbbuff を wchar_t へ変換
-			cbbuffW = ConvertUTF16(cbbuff, len);
+			cbbuffW = ConvertUTF16((const BYTE *)cbbuff, len);
 			free(cbbuff);
 			cbbuff = NULL;
 
@@ -5115,7 +5111,7 @@ static void XSequence(BYTE b)
 					cv.TitleRemoteW = NULL;
 				}
 				else {
-					wchar_t *titleW = ConvertUTF16(StrBuff, len);
+					wchar_t *titleW = ConvertUTF16((const BYTE *)StrBuff, len);
 					cv.TitleRemoteW = titleW;
 				}
 				ChangeTitle();
