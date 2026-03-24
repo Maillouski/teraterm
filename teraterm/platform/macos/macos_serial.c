@@ -61,9 +61,7 @@ TTMacSerial tt_mac_serial_open(const char* device_path) {
         return NULL;
     }
 
-    /* Clear non-blocking for normal operation */
-    int flags = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    /* Keep non-blocking mode for poll-based I/O from the main thread */
 
     TTMacSerialImpl* impl = (TTMacSerialImpl*)calloc(1, sizeof(TTMacSerialImpl));
     if (!impl) {
@@ -76,12 +74,12 @@ TTMacSerial tt_mac_serial_open(const char* device_path) {
     /* Save original termios */
     tcgetattr(fd, &impl->original_attrs);
 
-    /* Configure raw mode */
+    /* Configure raw mode with immediate return (non-blocking via O_NONBLOCK) */
     struct termios options;
     tcgetattr(fd, &options);
     cfmakeraw(&options);
     options.c_cc[VMIN] = 0;
-    options.c_cc[VTIME] = 10;  /* 1 second timeout */
+    options.c_cc[VTIME] = 0;  /* Return immediately - we use O_NONBLOCK + polling */
     tcsetattr(fd, TCSANOW, &options);
 
     return (TTMacSerial)impl;
@@ -182,7 +180,12 @@ int tt_mac_serial_set_flow_control(TTMacSerial port, int flow) {
 int tt_mac_serial_read(TTMacSerial port, void* buffer, int size) {
     if (!port) return -1;
     TTMacSerialImpl* impl = (TTMacSerialImpl*)port;
-    return (int)read(impl->fd, buffer, size);
+    int n = (int)read(impl->fd, buffer, size);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0; /* No data yet */
+        return -1; /* Real error */
+    }
+    return n;
 }
 
 int tt_mac_serial_write(TTMacSerial port, const void* buffer, int size) {

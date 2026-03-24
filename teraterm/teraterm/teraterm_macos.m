@@ -174,8 +174,8 @@
     [self.dataBitsPopup selectItemWithTitle:@"8"];
     [sv addSubview:self.dataBitsPopup];
 
-    [self addLabel:@"Parity:" at:NSMakePoint(230, 120) to:sv];
-    self.parityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(290, 118, 120, 26) pullsDown:NO];
+    [self addLabel:@"Parity:" at:NSMakePoint(240, 120) to:sv width:60];
+    self.parityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(305, 118, 105, 26) pullsDown:NO];
     [self.parityPopup addItemWithTitle:@"None"];
     [self.parityPopup addItemWithTitle:@"Odd"];
     [self.parityPopup addItemWithTitle:@"Even"];
@@ -187,8 +187,8 @@
     [self.stopBitsPopup addItemWithTitle:@"2"];
     [sv addSubview:self.stopBitsPopup];
 
-    [self addLabel:@"Flow Ctrl:" at:NSMakePoint(230, 85) to:sv];
-    self.flowControlPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(290, 83, 120, 26) pullsDown:NO];
+    [self addLabel:@"Flow Ctrl:" at:NSMakePoint(240, 85) to:sv width:60];
+    self.flowControlPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(305, 83, 105, 26) pullsDown:NO];
     [self.flowControlPopup addItemWithTitle:@"None"];
     [self.flowControlPopup addItemWithTitle:@"XON/XOFF"];
     [self.flowControlPopup addItemWithTitle:@"RTS/CTS"];
@@ -239,8 +239,12 @@
 }
 
 - (void)addLabel:(NSString *)text at:(NSPoint)pt to:(NSView *)view {
+    [self addLabel:text at:pt to:view width:95];
+}
+
+- (void)addLabel:(NSString *)text at:(NSPoint)pt to:(NSView *)view width:(CGFloat)w {
     NSTextField *label = [NSTextField labelWithString:text];
-    label.frame = NSMakeRect(pt.x, pt.y, 95, 18);
+    label.frame = NSMakeRect(pt.x, pt.y, w, 18);
     label.alignment = NSTextAlignmentRight;
     [view addSubview:label];
 }
@@ -354,10 +358,9 @@
     NSWindow *nsWin = (__bridge NSWindow *)self.window;
     NSRect contentBounds = nsWin.contentView.bounds;
 
-    /* Status bar at top of window (Cocoa coords: y increases upward) */
+    /* Status bar at bottom of window (Cocoa y=0 is bottom) */
     self.statusField = [[NSTextField alloc] initWithFrame:
-        NSMakeRect(0, contentBounds.size.height - kStatusBarHeight,
-                   contentBounds.size.width, kStatusBarHeight)];
+        NSMakeRect(0, 0, contentBounds.size.width, kStatusBarHeight)];
     self.statusField.editable = NO;
     self.statusField.bordered = NO;
     self.statusField.drawsBackground = YES;
@@ -365,12 +368,12 @@
     self.statusField.textColor = [NSColor colorWithCalibratedWhite:0.7 alpha:1.0];
     self.statusField.font = [NSFont systemFontOfSize:11];
     self.statusField.stringValue = @"Not connected";
-    self.statusField.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    self.statusField.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [nsWin.contentView addSubview:self.statusField];
 
-    /* Terminal view fills content area below status bar */
+    /* Terminal view fills content area above status bar */
     self.termView = tt_mac_termview_create_inset(self.window,
-        (int)kStatusBarHeight, 0, 0, 0);
+        0, (int)kStatusBarHeight, 0, 0);
     tt_mac_termview_set_font(self.termView, "Menlo", 14, 0, 0);
     tt_mac_termview_set_colors(self.termView, 0x00FFFFFF, 0x00000000);
 }
@@ -431,8 +434,8 @@ static void session_log_callback(const char *data, int len, void *ctx) {
     tt_mac_window_set_title(self.window, title.UTF8String);
     [self updateStatus:[NSString stringWithUTF8String:desc]];
 
-    /* Start read timer */
-    self.readTimer = [NSTimer scheduledTimerWithTimeInterval:0.005
+    /* Start read timer — read all available data each tick */
+    self.readTimer = [NSTimer scheduledTimerWithTimeInterval:0.016
                                                       target:self
                                                     selector:@selector(readFromConnection:)
                                                     userInfo:nil
@@ -447,12 +450,21 @@ static void session_log_callback(const char *data, int len, void *ctx) {
         return;
     }
 
+    /* Drain all available data in this tick */
     char buffer[4096];
-    int n = tt_conn_read(self.connection, buffer, sizeof(buffer));
-    if (n > 0) {
-        tt_mac_termview_write(self.termView, buffer, n);
-    } else if (n < 0) {
-        [self disconnect];
+    int total = 0;
+    for (;;) {
+        int n = tt_conn_read(self.connection, buffer, sizeof(buffer));
+        if (n > 0) {
+            tt_mac_termview_write(self.termView, buffer, n);
+            total += n;
+            if (total > 64 * 1024) break; /* Cap per-tick to avoid UI stall */
+        } else if (n == 0) {
+            break; /* No more data available */
+        } else {
+            [self disconnect];
+            return;
+        }
     }
 }
 
@@ -572,6 +584,12 @@ static void session_log_callback(const char *data, int len, void *ctx) {
 
 /* --- Menu Bar --- */
 
+- (void)addMenuItem:(NSMenu *)menu title:(NSString *)title action:(SEL)action key:(NSString *)key {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.target = self;
+    [menu addItem:item];
+}
+
 - (void)setupMenuBar {
     NSMenu *mainMenu = [[NSMenu alloc] init];
 
@@ -591,24 +609,14 @@ static void session_log_callback(const char *data, int len, void *ctx) {
     /* File menu */
     NSMenuItem *fileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-    [fileMenu addItemWithTitle:@"New Connection..."
-                        action:@selector(newConnection:)
-                 keyEquivalent:@"n"];
+    [self addMenuItem:fileMenu title:@"New Connection..." action:@selector(newConnection:) key:@"n"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Disconnect"
-                        action:@selector(disconnectSession:)
-                 keyEquivalent:@"d"];
+    [self addMenuItem:fileMenu title:@"Disconnect" action:@selector(disconnectSession:) key:@"d"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Send File..."
-                        action:@selector(sendFile:)
-                 keyEquivalent:@""];
-    [fileMenu addItemWithTitle:@"Receive File..."
-                        action:@selector(receiveFile:)
-                 keyEquivalent:@""];
+    [self addMenuItem:fileMenu title:@"Send File..." action:@selector(sendFile:) key:@""];
+    [self addMenuItem:fileMenu title:@"Receive File..." action:@selector(receiveFile:) key:@""];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Log..."
-                        action:@selector(startLog:)
-                 keyEquivalent:@"l"];
+    [self addMenuItem:fileMenu title:@"Log..." action:@selector(startLog:) key:@"l"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Close"
                         action:@selector(performClose:)
@@ -616,79 +624,43 @@ static void session_log_callback(const char *data, int len, void *ctx) {
     fileMenuItem.submenu = fileMenu;
     [mainMenu addItem:fileMenuItem];
 
-    /* Edit menu */
+    /* Edit menu — copy/paste/selectAll use nil target (responder chain → view) */
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [editMenu addItemWithTitle:@"Copy"
-                        action:@selector(copy:)
-                 keyEquivalent:@"c"];
-    [editMenu addItemWithTitle:@"Paste"
-                        action:@selector(paste:)
-                 keyEquivalent:@"v"];
-    [editMenu addItemWithTitle:@"Paste with CR"
-                        action:@selector(pasteCR:)
-                 keyEquivalent:@""];
+    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [self addMenuItem:editMenu title:@"Paste with CR" action:@selector(pasteCR:) key:@""];
     [editMenu addItem:[NSMenuItem separatorItem]];
-    [editMenu addItemWithTitle:@"Select All"
-                        action:@selector(selectAll:)
-                 keyEquivalent:@"a"];
-    [editMenu addItemWithTitle:@"Select Screen"
-                        action:@selector(selectScreen:)
-                 keyEquivalent:@""];
-    [editMenu addItemWithTitle:@"Cancel Selection"
-                        action:@selector(cancelSelection:)
-                 keyEquivalent:@""];
+    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [self addMenuItem:editMenu title:@"Select Screen" action:@selector(selectScreen:) key:@""];
+    [self addMenuItem:editMenu title:@"Cancel Selection" action:@selector(cancelSelection:) key:@""];
     [editMenu addItem:[NSMenuItem separatorItem]];
-    [editMenu addItemWithTitle:@"Clear Screen"
-                        action:@selector(clearScreen:)
-                 keyEquivalent:@""];
-    [editMenu addItemWithTitle:@"Clear Buffer"
-                        action:@selector(clearBuffer:)
-                 keyEquivalent:@""];
+    [self addMenuItem:editMenu title:@"Clear Screen" action:@selector(clearScreen:) key:@""];
+    [self addMenuItem:editMenu title:@"Clear Buffer" action:@selector(clearBuffer:) key:@""];
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
-    /* Setup menu */
+    /* Setup menu — use explicit target so actions reach the app delegate */
     NSMenuItem *setupMenuItem = [[NSMenuItem alloc] init];
     NSMenu *setupMenu = [[NSMenu alloc] initWithTitle:@"Setup"];
-    [setupMenu addItemWithTitle:@"Terminal..."
-                         action:@selector(setupTerminal:)
-                  keyEquivalent:@""];
-    [setupMenu addItemWithTitle:@"Serial Port..."
-                         action:@selector(setupSerial:)
-                  keyEquivalent:@""];
-    [setupMenu addItemWithTitle:@"Font..."
-                         action:@selector(setupFont:)
-                  keyEquivalent:@""];
+    [self addMenuItem:setupMenu title:@"Terminal..." action:@selector(setupTerminal:) key:@""];
+    [self addMenuItem:setupMenu title:@"Serial Port..." action:@selector(setupSerial:) key:@""];
+    [self addMenuItem:setupMenu title:@"Font..." action:@selector(setupFont:) key:@""];
     [setupMenu addItem:[NSMenuItem separatorItem]];
-    [setupMenu addItemWithTitle:@"Save Setup..."
-                         action:@selector(saveSetup:)
-                  keyEquivalent:@""];
-    [setupMenu addItemWithTitle:@"Restore Setup..."
-                         action:@selector(restoreSetup:)
-                  keyEquivalent:@""];
+    [self addMenuItem:setupMenu title:@"Save Setup..." action:@selector(saveSetup:) key:@""];
+    [self addMenuItem:setupMenu title:@"Restore Setup..." action:@selector(restoreSetup:) key:@""];
     setupMenuItem.submenu = setupMenu;
     [mainMenu addItem:setupMenuItem];
 
     /* Control menu */
     NSMenuItem *controlMenuItem = [[NSMenuItem alloc] init];
     NSMenu *controlMenu = [[NSMenu alloc] initWithTitle:@"Control"];
-    [controlMenu addItemWithTitle:@"Reset Terminal"
-                           action:@selector(resetTerminal:)
-                    keyEquivalent:@""];
-    [controlMenu addItemWithTitle:@"Reset Remote Title"
-                           action:@selector(resetRemoteTitle:)
-                    keyEquivalent:@""];
+    [self addMenuItem:controlMenu title:@"Reset Terminal" action:@selector(resetTerminal:) key:@""];
+    [self addMenuItem:controlMenu title:@"Reset Remote Title" action:@selector(resetRemoteTitle:) key:@""];
     [controlMenu addItem:[NSMenuItem separatorItem]];
-    [controlMenu addItemWithTitle:@"Are You There"
-                           action:@selector(areYouThere:)
-                    keyEquivalent:@""];
-    [controlMenu addItemWithTitle:@"Send Break"
-                           action:@selector(sendBreak:)
-                    keyEquivalent:@"b"];
-    [controlMenu addItemWithTitle:@"Reset Port"
-                           action:@selector(resetPort:)
-                    keyEquivalent:@""];
+    [self addMenuItem:controlMenu title:@"Are You There" action:@selector(areYouThere:) key:@""];
+    [self addMenuItem:controlMenu title:@"Send Break" action:@selector(sendBreak:) key:@"b"];
+    [self addMenuItem:controlMenu title:@"Reset Port" action:@selector(resetPort:) key:@""];
     controlMenuItem.submenu = controlMenu;
     [mainMenu addItem:controlMenuItem];
 
@@ -826,7 +798,6 @@ static void session_log_callback(const char *data, int len, void *ctx) {
 }
 
 - (void)setupSerial:(id)sender {
-    /* Show current serial parameters if connected, or let user change defaults */
     NSAlert *dialog = [[NSAlert alloc] init];
     dialog.messageText = @"Serial Port Setup";
 
@@ -849,7 +820,19 @@ static void session_log_callback(const char *data, int len, void *ctx) {
     dialog.accessoryView = view;
     [dialog addButtonWithTitle:@"OK"];
     [dialog addButtonWithTitle:@"Cancel"];
-    [dialog runModal];
+
+    if ([dialog runModal] == NSAlertFirstButtonReturn) {
+        /* Apply baud rate change to active serial connection */
+        if (self.session.connection &&
+            tt_conn_get_type(self.session.connection) == TT_CONN_SERIAL) {
+            int baud = baudPopup.titleOfSelectedItem.intValue;
+            int flow = (int)[flowPopup indexOfSelectedItem];
+            /* Reconnect with new params would be ideal, but for now update status */
+            [self.session updateStatus:
+                [NSString stringWithFormat:@"Serial setup: %d baud, flow=%d (reconnect to apply)",
+                 baud, flow]];
+        }
+    }
 }
 
 - (void)setupFont:(id)sender {
