@@ -53,9 +53,19 @@
                                 0x00000000); /* black background */
 }
 
+static void pty_output_callback(const char *data, int len, void *ctx) {
+    TTMacPty pty = (TTMacPty)ctx;
+    if (pty && data && len > 0) {
+        tt_mac_pty_write(pty, data, len);
+    }
+}
+
 - (void)startLocalShell {
     self.pty = tt_mac_pty_create(NULL, 80, 24);
     if (self.pty) {
+        /* Set up keyboard → PTY output path */
+        tt_mac_termview_set_output_cb(self.termView, pty_output_callback, self.pty);
+
         /* Start reading from PTY */
         self.readTimer = [NSTimer scheduledTimerWithTimeInterval:0.01
                                                           target:self
@@ -71,11 +81,8 @@
     char buffer[4096];
     int n = tt_mac_pty_read(self.pty, buffer, sizeof(buffer) - 1);
     if (n > 0) {
-        buffer[n] = '\0';
-        /* TODO: Feed data to VT terminal emulation engine (vtterm.c) */
-        /* For now, this is a placeholder - the terminal emulation core
-         * will process escape sequences and update the display buffer */
-        tt_mac_termview_invalidate(self.termView);
+        /* Feed PTY output to the terminal emulator view */
+        tt_mac_termview_write(self.termView, buffer, n);
     } else if (n < 0) {
         /* PTY closed or error */
         [self.readTimer invalidate];

@@ -37,6 +37,8 @@ void tt_mac_termview_set_font(TTMacView view, const char* family, int size, int 
 void tt_mac_termview_set_colors(TTMacView view, unsigned int fg, unsigned int bg);
 void tt_mac_termview_invalidate(TTMacView view);
 void tt_mac_termview_scroll(TTMacView view, int lines);
+void tt_mac_termview_write(TTMacView view, const char *data, int len);
+void tt_mac_termview_set_output_cb(TTMacView view, void (*cb)(const char*, int, void*), void *ctx);
 
 /* Drawing context */
 TTMacGraphicsContext tt_mac_gc_begin(TTMacView view);
