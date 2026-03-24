@@ -39,17 +39,17 @@ extern "C" {
 #define _Printf_format_string_
 #endif
 
+/* On POSIX systems, asprintf/vasprintf are provided by libc.
+ * Only declare our own on Windows (MSVC). */
 #if defined(_MSC_VER)
 int asprintf(char **strp, _Printf_format_string_ const char *fmt, ...);
-int aswprintf(wchar_t **strp, _Printf_format_string_ const wchar_t *fmt, ...);
-#elif defined(__GNUC__)
-int asprintf(char **strp, const char *fmt, ...) __attribute__ ((format (printf, 2, 3)));
-int aswprintf(wchar_t **strp, const wchar_t *fmt, ...); // __attribute__ ((format (wprintf, 2, 3)));
-#else
-int asprintf(char **strp, const char *fmt, ...);
-int aswprintf(wchar_t **strp, const wchar_t *fmt, ...);
-#endif
 int vasprintf(char **strp, const char *fmt, va_list ap);
+#elif !defined(__APPLE__) && !defined(__linux__)
+int asprintf(char **strp, const char *fmt, ...);
+int vasprintf(char **strp, const char *fmt, va_list ap);
+#endif
+
+int aswprintf(wchar_t **strp, const wchar_t *fmt, ...);
 int vaswprintf(wchar_t **strp, const wchar_t *fmt, va_list ap);
 
 void awcscat(wchar_t **dest, const wchar_t *add);

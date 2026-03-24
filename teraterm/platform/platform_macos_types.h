@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -49,8 +50,13 @@ typedef LONG_PTR            LRESULT;
 typedef UINT_PTR            WPARAM;
 typedef LONG_PTR            LPARAM;
 
+typedef LONG                LSTATUS;
+typedef int                 errno_t;
+typedef void*               PVOID;
+
 /* --- Pointer types --- */
 typedef char*               LPSTR;
+typedef char*               PCHAR;
 typedef const char*         LPCSTR;
 typedef wchar_t*            LPWSTR;
 typedef const wchar_t*      LPCWSTR;
@@ -187,6 +193,15 @@ typedef struct tagLOGFONTA {
     BYTE  lfPitchAndFamily;
     CHAR  lfFaceName[LF_FACESIZE];
 } LOGFONTA, *LPLOGFONTA;
+
+typedef LOGFONTA* PLOGFONTA;
+typedef LOGFONTW* PLOGFONTW;
+
+#ifdef UNICODE
+typedef LOGFONTW* PLOGFONT;
+#else
+typedef LOGFONTA* PLOGFONT;
+#endif
 
 #ifdef UNICODE
 typedef LOGFONTW LOGFONT;
@@ -393,6 +408,59 @@ typedef int SOCKET;
 #define WSAEWOULDBLOCK  EWOULDBLOCK
 #define WSAEINPROGRESS  EINPROGRESS
 
+/* --- Handle types (additional) --- */
+typedef void*               HDROP;
+typedef void*               HDEVINFO;
+
+/* --- Dialog types --- */
+typedef INT_PTR (CALLBACK *DLGPROC)(HWND, UINT, WPARAM, LPARAM);
+typedef struct { DWORD style; DWORD dwExtendedStyle; WORD cdit; short x; short y; short cx; short cy; } DLGTEMPLATE;
+typedef const DLGTEMPLATE*  LPCDLGTEMPLATE;
+
+/* --- Device info --- */
+typedef struct _SP_DEVINFO_DATA {
+    DWORD cbSize;
+    DWORD ClassGuid[4];
+    DWORD DevInst;
+    ULONG_PTR Reserved;
+} SP_DEVINFO_DATA, *PSP_DEVINFO_DATA;
+
+typedef struct _DEVPROPKEY {
+    DWORD fmtid[4];
+    DWORD pid;
+} DEVPROPKEY;
+
+/* --- DECLARE_HANDLE macro --- */
+#ifndef DECLARE_HANDLE
+#define DECLARE_HANDLE(name) typedef void* name
+#endif
+
+/* --- Code page constants --- */
+#define CP_ACP            0
+#define CP_UTF8           65001
+
+/* --- MultiByteToWideChar / WideCharToMultiByte flags --- */
+#define MB_ERR_INVALID_CHARS  0x00000008
+#define MB_PRECOMPOSED        0x00000001
+#define WC_COMPOSITECHECK     0x00000200
+
+/* --- File attribute constants --- */
+#define INVALID_FILE_ATTRIBUTES ((DWORD)-1)
+#define FILE_ATTRIBUTE_DIRECTORY 0x00000010
+
+/* --- Secure string macros --- */
+#ifndef _TRUNCATE
+#define _TRUNCATE ((size_t)-1)
+#endif
+#ifndef _countof
+#define _countof(arr) (sizeof(arr) / sizeof((arr)[0]))
+#endif
+
+/* --- _wcsdup mapping --- */
+#ifndef _wcsdup
+#define _wcsdup wcsdup
+#endif
+
 /* --- File API compatibility --- */
 #define MAX_PATH          260
 
@@ -424,6 +492,8 @@ typedef pthread_mutex_t CRITICAL_SECTION;
 #define sprintf_s   snprintf
 #define _vsnprintf  vsnprintf
 #define _vsnwprintf vswprintf
+#define _vsnprintf_s(buf, sz, trunc, fmt, ap) vsnprintf(buf, sz, fmt, ap)
+#define _vsnwprintf_s(buf, sz, trunc, fmt, ap) vswprintf(buf, sz, fmt, ap)
 #define ZeroMemory(p, sz) memset((p), 0, (sz))
 #define CopyMemory(d, s, sz) memcpy((d), (s), (sz))
 #define MoveMemory(d, s, sz) memmove((d), (s), (sz))
@@ -453,6 +523,163 @@ typedef LONG HRESULT;
 #define MAKELONG(a, b) ((LONG)(((WORD)((DWORD_PTR)(a) & 0xffff)) | ((DWORD)((WORD)((DWORD_PTR)(b) & 0xffff))) << 16))
 #define MAKEWORD(a, b) ((WORD)(((BYTE)((DWORD_PTR)(a) & 0xff)) | ((WORD)((BYTE)((DWORD_PTR)(b) & 0xff))) << 8))
 
+/* --- Monitor types --- */
+typedef BOOL (CALLBACK *MONITORENUMPROC)(HMONITOR, HDC, LPRECT, LPARAM);
+
+/* --- Cursor / Icon constants --- */
+#define IDC_HAND          ((LPCSTR)32649)
+#define IDC_ARROW         ((LPCSTR)32512)
+#define IMAGE_CURSOR      2
+#define IMAGE_ICON        1
+#define LR_SHARED         0x8000
+#define LR_DEFAULTSIZE    0x0040
+
+/* Cursor macros */
+#define CopyCursor(hcur)  ((HCURSOR)(hcur))
+#define DestroyCursor(hcur) ((void)0)
+
+/* --- GDI types --- */
+typedef struct _BLENDFUNCTION {
+    BYTE BlendOp;
+    BYTE BlendFlags;
+    BYTE SourceConstantAlpha;
+    BYTE AlphaFormat;
+} BLENDFUNCTION;
+
+/* --- Window function types --- */
+typedef LRESULT (CALLBACK *WNDPROC)(HWND, UINT, WPARAM, LPARAM);
+
+/* --- Window API constants --- */
+#define GWLP_USERDATA     (-21)
+#define GWLP_WNDPROC      (-4)
+#define GWL_STYLE         (-16)
+#define GWL_EXSTYLE       (-20)
+
+/* --- Listbox / Combobox messages --- */
+#define CB_ADDSTRING      0x0143
+#define CB_GETCURSEL      0x0147
+#define CB_SETCURSEL      0x014E
+#define CB_GETLBTEXT      0x0148
+#define CB_GETCOUNT        0x0146
+#define LB_ADDSTRING      0x0180
+#define LB_GETCURSEL      0x0188
+#define LB_SETCURSEL      0x0186
+#define LB_GETTEXT        0x0189
+#define LB_GETCOUNT       0x018B
+#define LB_ERR            (-1)
+#define CB_ERR            (-1)
+#define CB_GETCOUNT       0x0146
+#define CB_RESETCONTENT   0x014B
+#define LB_RESETCONTENT   0x0184
+
+/* --- Error codes --- */
+#define NO_ERROR                    0L
+#define ERROR_SUCCESS               0L
+#define ERROR_INSUFFICIENT_BUFFER   122L
+
+/* --- Secure CRT function mappings --- */
+#ifndef _snwprintf_s
+#define _snwprintf_s(buf, sz, trunc, ...) swprintf(buf, sz, __VA_ARGS__)
+#endif
+#ifndef _wfopen_s
+static inline errno_t _wfopen_s_impl(FILE **pf, const wchar_t *filename, const wchar_t *mode) {
+    char fn[1024], md[32];
+    wcstombs(fn, filename, sizeof(fn));
+    wcstombs(md, mode, sizeof(md));
+    *pf = fopen(fn, md);
+    return *pf ? 0 : errno;
+}
+#define _wfopen_s(pf, fn, mode) _wfopen_s_impl(pf, fn, mode)
+#endif
+#ifndef fopen_s
+static inline errno_t fopen_s_impl(FILE **pf, const char *filename, const char *mode) {
+    *pf = fopen(filename, mode);
+    return *pf ? 0 : errno;
+}
+#define fopen_s(pf, fn, mode) fopen_s_impl(pf, fn, mode)
+#endif
+#ifndef swscanf_s
+#define swscanf_s swscanf
+#endif
+
+/* --- Window functions (stubs) --- */
+LONG_PTR GetWindowLongPtrW(HWND hWnd, int nIndex);
+LONG_PTR SetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong);
+HWND GetDlgItem(HWND hDlg, int nIDDlgItem);
+int GetClassNameA(HWND hWnd, LPSTR lpClassName, int nMaxCount);
+BOOL PostMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
+HINSTANCE ShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile,
+    LPCSTR lpParameters, LPCSTR lpDirectory, int nShowCmd);
+LRESULT SendDlgItemMessageW(HWND hDlg, int nIDDlgItem, UINT Msg, WPARAM wParam, LPARAM lParam);
+BOOL GetClientRect(HWND hWnd, LPRECT lpRect);
+BOOL PtInRect(const RECT *lprc, POINT pt);
+BOOL InvalidateRect(HWND hWnd, const RECT *lpRect, BOOL bErase);
+LRESULT CallWindowProcW(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
+HANDLE LoadImageA(HINSTANCE hInst, LPCSTR name, UINT type, int cx, int cy, UINT fuLoad);
+HCURSOR SetCursor(HCURSOR hCursor);
+BOOL SetCapture(HWND hWnd);
+BOOL ReleaseCapture(void);
+BOOL ScreenToClient(HWND hWnd, LPPOINT lpPoint);
+BOOL GetCursorPos(LPPOINT lpPoint);
+UINT_PTR SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, void* lpTimerFunc);
+BOOL KillTimer(HWND hWnd, UINT_PTR uIDEvent);
+void OutputDebugStringA(LPCSTR lpOutputString);
+LRESULT SendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
+#define SendMessage SendMessageW
+HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint);
+BOOL EndPaint(HWND hWnd, const PAINTSTRUCT *lpPaint);
+int FillRect(HDC hDC, const RECT *lprc, HBRUSH hbr);
+BOOL DrawFocusRect(HDC hDC, const RECT *lprc);
+HGDIOBJ SelectObject(HDC hdc, HGDIOBJ h);
+int SetBkMode(HDC hdc, int mode);
+BOOL TextOutA(HDC hdc, int x, int y, LPCSTR lpString, int c);
+#define TextOut TextOutA
+HWND GetParent(HWND hWnd);
+HWND GetFocus(void);
+int GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount);
+#define GetWindowText GetWindowTextA
+#define lstrlen strlen
+BOOL SetSystemCursor(HCURSOR hcur, DWORD id);
+BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni);
+HBRUSH GetSysColorBrush(int nIndex);
+COLORREF GetSysColor(int nIndex);
+#define SPI_SETCURSORS    0x0057
+#define OCR_NORMAL        32512
+#define COLOR_HOTLIGHT    26
+#define DT_LEFT           0x00000000
+#define DT_CALCRECT       0x00000400
+
+/* GDI functions */
+COLORREF SetTextColor(HDC hdc, COLORREF color);
+BOOL DeleteObject(HGDIOBJ ho);
+HFONT CreateFontIndirectA(const LOGFONTA *lplf);
+int DrawTextA(HDC hdc, LPCSTR lpchText, int cchText, LPRECT lprc, UINT format);
+#define SystemParametersInfo SystemParametersInfoA
+#define CreateFontIndirect CreateFontIndirectA
+#define DrawText DrawTextA
+
+/* Static control styles */
+#define SS_NOTIFY         0x0100
+#define SS_OWNERDRAW      0x000D
+
+/* Button messages */
+#define BM_GETCHECK       0x00F0
+#define BST_CHECKED       0x0001
+
+/* More GDI/Window functions */
+int GetObjectA(HANDLE h, int c, LPVOID pv);
+#define GetObject GetObjectA
+HDC GetDC(HWND hWnd);
+int ReleaseDC(HWND hWnd, HDC hDC);
+BOOL GetWindowRect(HWND hWnd, LPRECT lpRect);
+BOOL MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint);
+DWORD GetTabbedTextExtentW(HDC hdc, LPCWSTR lpString, int chCount, int nTabPositions, const int *lpnTabStopPositions);
+int GetDeviceCaps(HDC hdc, int index);
+#define LOGPIXELSY        90
+
+BOOL SetDlgItemTextW(HWND hDlg, int nIDDlgItem, LPCWSTR lpString);
+BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString);
+
 /* Forward declarations for platform-specific functions */
 void* dlopen_wide(const wchar_t* name);
 DWORD GetTickCount(void);
@@ -461,6 +688,25 @@ DWORD GetLastError(void);
 void SetLastError(DWORD dwErrCode);
 DWORD GetCurrentThreadId(void);
 DWORD GetCurrentProcessId(void);
+
+/* INI file functions */
+DWORD GetPrivateProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+    LPCWSTR lpDefault, LPWSTR lpReturnedString, DWORD nSize, LPCWSTR lpFileName);
+UINT GetPrivateProfileIntW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+    INT nDefault, LPCWSTR lpFileName);
+BOOL WritePrivateProfileStringW(LPCWSTR lpAppName, LPCWSTR lpKeyName,
+    LPCWSTR lpString, LPCWSTR lpFileName);
+
+/* File functions */
+DWORD GetFileAttributesW(LPCWSTR lpFileName);
+UINT GetACP(void);
+
+/* Codepage conversion */
+int MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
+    int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);
+int WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
+    int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte,
+    LPCSTR lpDefaultChar, LPBOOL lpUsedDefaultChar);
 
 #ifdef __cplusplus
 }

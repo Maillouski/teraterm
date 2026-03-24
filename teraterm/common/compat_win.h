@@ -35,6 +35,8 @@
 
 #pragma once
 
+#if defined(_WIN32) || defined(_WIN64)
+
 #include <windows.h>
 #include <imagehlp.h>	// for SymGetLineFromAddr()
 #include <shlobj.h>		// for SHGetKnownFolderPath()
@@ -266,3 +268,5 @@ void WinCompatInit();
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* _WIN32 || _WIN64 */
