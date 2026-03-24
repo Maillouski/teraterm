@@ -36,7 +36,7 @@ static NSColor* color_from_index(int index, int bold) {
 }
 
 /* --- Terminal View (custom NSView) --- */
-@interface TTTerminalView : NSView {
+@interface TTTerminalView : NSView <NSTextInputClient> {
     termbuf_t *_termbuf;
     int _charWidth;
     int _charHeight;
@@ -48,6 +48,13 @@ static NSColor* color_from_index(int index, int bold) {
 @property (nonatomic, strong) NSColor *bgColor;
 @property (nonatomic, assign) void (*outputCb)(const char*, int, void*);
 @property (nonatomic, assign) void *outputCtx;
+/* Text selection */
+@property (nonatomic, assign) BOOL selecting;
+@property (nonatomic, assign) int selStartCol;
+@property (nonatomic, assign) int selStartRow;
+@property (nonatomic, assign) int selEndCol;
+@property (nonatomic, assign) int selEndRow;
+@property (nonatomic, assign) BOOL hasSelection;
 @end
 
 @implementation TTTerminalView
@@ -62,6 +69,8 @@ static NSColor* color_from_index(int index, int bold) {
         _bgColor = [NSColor blackColor];
         _outputCb = NULL;
         _outputCtx = NULL;
+        _hasSelection = NO;
+        _selecting = NO;
 
         /* Calculate font metrics */
         [self updateFontMetrics];
@@ -96,6 +105,19 @@ static NSColor* color_from_index(int index, int bold) {
     return YES;
 }
 
+- (BOOL)isCellSelected:(int)col row:(int)row {
+    if (!_hasSelection) return NO;
+    int r1 = _selStartRow, c1 = _selStartCol, r2 = _selEndRow, c2 = _selEndCol;
+    if (r1 > r2 || (r1 == r2 && c1 > c2)) {
+        int tr = r1, tc = c1; r1 = r2; c1 = c2; r2 = tr; c2 = tc;
+    }
+    if (row < r1 || row > r2) return NO;
+    if (row == r1 && row == r2) return col >= c1 && col <= c2;
+    if (row == r1) return col >= c1;
+    if (row == r2) return col <= c2;
+    return YES;
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
     if (!_termbuf) {
         [self.bgColor setFill];
@@ -107,6 +129,8 @@ static NSColor* color_from_index(int index, int bold) {
     int rows = termbuf_get_rows(_termbuf);
     int cx, cy;
     termbuf_get_cursor(_termbuf, &cx, &cy);
+    int vp_offset = termbuf_get_viewport_offset(_termbuf);
+    int sb_lines = termbuf_scrollback_lines(_termbuf);
 
     /* Calculate visible row range from dirty rect */
     int startRow = (int)(dirtyRect.origin.y / _charHeight);
@@ -118,15 +142,43 @@ static NSColor* color_from_index(int index, int bold) {
     [self.bgColor setFill];
     NSRectFill(dirtyRect);
 
-    /* Draw each cell */
-    for (int row = startRow; row < endRow; row++) {
-        /* Batch consecutive cells with same attributes for efficiency */
+    /* Draw each visible row */
+    for (int screen_row = startRow; screen_row < endRow; screen_row++) {
+        /* Map screen row to data source (scrollback or screen buffer) */
+        int data_row = screen_row - vp_offset;
+        int from_scrollback = 0;
+        int sb_line = -1;
+
+        if (vp_offset > 0 && screen_row < vp_offset) {
+            /* This row comes from scrollback */
+            sb_line = sb_lines - vp_offset + screen_row;
+            if (sb_line < 0 || sb_line >= sb_lines) continue;
+            from_scrollback = 1;
+        } else {
+            data_row = screen_row - (vp_offset > rows ? rows : 0);
+            /* Adjust: when scrolled up, bottom rows show screen buffer */
+            data_row = screen_row;
+            if (vp_offset > 0) {
+                if (screen_row < vp_offset) {
+                    from_scrollback = 1;
+                    sb_line = sb_lines - vp_offset + screen_row;
+                } else {
+                    data_row = screen_row - vp_offset;
+                }
+            }
+            if (data_row < 0 || data_row >= rows) continue;
+        }
+
         int col = 0;
         while (col < cols) {
-            const termbuf_cell_t *cell = termbuf_get_cell(_termbuf, col, row);
+            const termbuf_cell_t *cell;
+            if (from_scrollback) {
+                cell = termbuf_get_scrollback_cell(_termbuf, col, sb_line);
+            } else {
+                cell = termbuf_get_cell(_termbuf, col, data_row);
+            }
             if (!cell) { col++; continue; }
 
-            /* Collect run of same-attribute cells */
             uint8_t attr = cell->attr;
             uint8_t fg_idx = cell->fg;
             uint8_t bg_idx = cell->bg;
@@ -135,14 +187,15 @@ static NSColor* color_from_index(int index, int bold) {
             int run_len = 0;
 
             while (col < cols && run_len < 255) {
-                cell = termbuf_get_cell(_termbuf, col, row);
+                if (from_scrollback)
+                    cell = termbuf_get_scrollback_cell(_termbuf, col, sb_line);
+                else
+                    cell = termbuf_get_cell(_termbuf, col, data_row);
                 if (!cell) break;
-                if (col > run_start && (cell->attr != attr || cell->fg != fg_idx || cell->bg != bg_idx)) {
+                if (col > run_start && (cell->attr != attr || cell->fg != fg_idx || cell->bg != bg_idx))
                     break;
-                }
                 uint32_t ch = cell->ch;
                 if (ch == 0 || ch == ' ') ch = ' ';
-                /* Handle BMP characters; surrogates for >0xFFFF not handled yet */
                 run_chars[run_len++] = (ch > 0xFFFF) ? 0xFFFD : (unichar)ch;
                 col++;
             }
@@ -156,12 +209,26 @@ static NSColor* color_from_index(int index, int bold) {
             int draw_fg = is_reverse ? bg_idx : fg_idx;
             int draw_bg = is_reverse ? fg_idx : bg_idx;
 
-            /* Draw background if non-default */
-            NSColor *bgColor_cell = color_from_index(draw_bg, 0);
-            if (draw_bg != 0 || is_reverse) {
-                [bgColor_cell setFill];
-                NSRectFill(NSMakeRect(run_start * _charWidth, row * _charHeight,
-                                      run_len * _charWidth, _charHeight));
+            /* Draw background if non-default or selected */
+            BOOL has_sel_in_run = NO;
+            if (_hasSelection) {
+                for (int rc = run_start; rc < run_start + run_len; rc++) {
+                    if ([self isCellSelected:rc row:screen_row]) { has_sel_in_run = YES; break; }
+                }
+            }
+
+            if (draw_bg != 0 || is_reverse || has_sel_in_run) {
+                for (int rc = run_start; rc < run_start + run_len; rc++) {
+                    NSColor *bgc;
+                    if (_hasSelection && [self isCellSelected:rc row:screen_row]) {
+                        bgc = [NSColor selectedTextBackgroundColor];
+                    } else {
+                        bgc = color_from_index(draw_bg, 0);
+                    }
+                    [bgc setFill];
+                    NSRectFill(NSMakeRect(rc * _charWidth, screen_row * _charHeight,
+                                          _charWidth, _charHeight));
+                }
             }
 
             /* Draw text */
@@ -178,19 +245,34 @@ static NSColor* color_from_index(int index, int bold) {
 
             NSString *str = [NSString stringWithCharacters:run_chars length:run_len];
             [str drawAtPoint:NSMakePoint(run_start * _charWidth,
-                                         row * _charHeight + (_charHeight - _fontAscent - (int)ceil(-_termFont.descender)) / 2)
+                                         screen_row * _charHeight + (_charHeight - _fontAscent - (int)ceil(-_termFont.descender)) / 2)
               withAttributes:attrs_dict];
         }
     }
 
-    /* Draw cursor (block cursor) */
-    if (cx >= 0 && cx < cols && cy >= startRow && cy < endRow) {
-        NSRect cursorRect = NSMakeRect(cx * _charWidth, cy * _charHeight,
-                                        _charWidth, _charHeight);
-        [[NSColor colorWithCalibratedWhite:0.7 alpha:0.5] setFill];
-        NSRectFillUsingOperation(cursorRect, NSCompositingOperationSourceOver);
-        [[NSColor colorWithCalibratedWhite:0.8 alpha:0.8] setStroke];
-        NSFrameRect(cursorRect);
+    /* Draw cursor (only when at bottom of scrollback and cursor visible) */
+    if (vp_offset == 0 && termbuf_get_cursor_visible(_termbuf)) {
+        if (cx >= 0 && cx < cols && cy >= startRow && cy < endRow) {
+            NSRect cursorRect = NSMakeRect(cx * _charWidth, cy * _charHeight,
+                                            _charWidth, _charHeight);
+            int shape = termbuf_get_cursor_shape(_termbuf);
+            if (shape == TERMBUF_CURSOR_BEAM) {
+                cursorRect.size.width = 2;
+                [[NSColor colorWithCalibratedWhite:0.9 alpha:0.9] setFill];
+                NSRectFillUsingOperation(cursorRect, NSCompositingOperationSourceOver);
+            } else if (shape == TERMBUF_CURSOR_UNDERLINE) {
+                cursorRect.origin.y += _charHeight - 2;
+                cursorRect.size.height = 2;
+                [[NSColor colorWithCalibratedWhite:0.9 alpha:0.9] setFill];
+                NSRectFillUsingOperation(cursorRect, NSCompositingOperationSourceOver);
+            } else {
+                /* Block cursor */
+                [[NSColor colorWithCalibratedWhite:0.7 alpha:0.5] setFill];
+                NSRectFillUsingOperation(cursorRect, NSCompositingOperationSourceOver);
+                [[NSColor colorWithCalibratedWhite:0.8 alpha:0.8] setStroke];
+                NSFrameRect(cursorRect);
+            }
+        }
     }
 
     termbuf_clear_dirty(_termbuf);
@@ -231,18 +313,151 @@ static NSColor* color_from_index(int index, int bold) {
     case NSF2FunctionKey:         seq = "\033OQ"; break;
     case NSF3FunctionKey:         seq = "\033OR"; break;
     case NSF4FunctionKey:         seq = "\033OS"; break;
+    case NSF5FunctionKey:         seq = "\033[15~"; break;
+    case NSF6FunctionKey:         seq = "\033[17~"; break;
+    case NSF7FunctionKey:         seq = "\033[18~"; break;
+    case NSF8FunctionKey:         seq = "\033[19~"; break;
+    case NSF9FunctionKey:         seq = "\033[20~"; break;
+    case NSF10FunctionKey:        seq = "\033[21~"; break;
+    case NSF11FunctionKey:        seq = "\033[23~"; break;
+    case NSF12FunctionKey:        seq = "\033[24~"; break;
+    case NSInsertFunctionKey:     seq = "\033[2~"; break;
     default: break;
     }
 
     if (seq && self.outputCb) {
         self.outputCb(seq, (int)strlen(seq), self.outputCtx);
     } else if (ch < 0xF700 && self.outputCb) {
+        /* Handle Meta/Alt key: send ESC prefix */
+        if (event.modifierFlags & NSEventModifierFlagOption) {
+            const char esc = '\033';
+            self.outputCb(&esc, 1, self.outputCtx);
+        }
         /* Normal character - send as UTF-8 */
         const char *utf8 = [chars UTF8String];
         if (utf8) {
             self.outputCb(utf8, (int)strlen(utf8), self.outputCtx);
         }
     }
+}
+
+/* --- Mouse selection --- */
+
+- (NSPoint)cellAtPoint:(NSPoint)pt {
+    NSPoint cell;
+    cell.x = (int)(pt.x / _charWidth);
+    cell.y = (int)(pt.y / _charHeight);
+    return cell;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+    NSPoint cell = [self cellAtPoint:pt];
+
+    /* Check if mouse tracking is active */
+    if (_termbuf && termbuf_get_mouse_mode(_termbuf) != TERMBUF_MOUSE_NONE) {
+        int mods = 0;
+        if (event.modifierFlags & NSEventModifierFlagShift) mods |= 1;
+        if (event.modifierFlags & NSEventModifierFlagOption) mods |= 2;
+        if (event.modifierFlags & NSEventModifierFlagControl) mods |= 4;
+        termbuf_report_mouse(_termbuf, 0, (int)cell.x, (int)cell.y, 1, mods);
+        return;
+    }
+
+    _selStartCol = (int)cell.x;
+    _selStartRow = (int)cell.y;
+    _selEndCol = _selStartCol;
+    _selEndRow = _selStartRow;
+    _selecting = YES;
+    _hasSelection = NO;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (!_selecting) return;
+    NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+    NSPoint cell = [self cellAtPoint:pt];
+    _selEndCol = (int)cell.x;
+    _selEndRow = (int)cell.y;
+    _hasSelection = YES;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    if (_termbuf && termbuf_get_mouse_mode(_termbuf) != TERMBUF_MOUSE_NONE) {
+        NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+        NSPoint cell = [self cellAtPoint:pt];
+        int mods = 0;
+        if (event.modifierFlags & NSEventModifierFlagShift) mods |= 1;
+        if (event.modifierFlags & NSEventModifierFlagOption) mods |= 2;
+        if (event.modifierFlags & NSEventModifierFlagControl) mods |= 4;
+        termbuf_report_mouse(_termbuf, 0, (int)cell.x, (int)cell.y, 0, mods);
+        return;
+    }
+    _selecting = NO;
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    if (!_termbuf) return;
+
+    /* Check for mouse wheel tracking */
+    if (termbuf_get_mouse_mode(_termbuf) != TERMBUF_MOUSE_NONE) {
+        int delta = (event.scrollingDeltaY > 0) ? 64 : 65; /* wheel up/down */
+        NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+        NSPoint cell = [self cellAtPoint:pt];
+        termbuf_report_mouse(_termbuf, delta, (int)cell.x, (int)cell.y, 1, 0);
+        return;
+    }
+
+    /* Scrollback navigation */
+    int lines = (int)(-event.scrollingDeltaY / 3.0);
+    if (lines == 0) lines = (event.scrollingDeltaY < 0) ? 1 : -1;
+    termbuf_scroll_viewport(_termbuf, lines);
+    [self setNeedsDisplay:YES];
+}
+
+/* --- Copy/Paste support --- */
+
+- (void)copy:(id)sender {
+    if (!_termbuf || !_hasSelection) return;
+    char *text = termbuf_get_text(_termbuf, _selStartCol, _selStartRow, _selEndCol, _selEndRow);
+    if (text) {
+        tt_mac_clipboard_set_text(text);
+        free(text);
+    }
+}
+
+- (void)paste:(id)sender {
+    if (!self.outputCb) return;
+    char *text = tt_mac_clipboard_get_text();
+    if (text) {
+        if (_termbuf && termbuf_get_bracketed_paste(_termbuf)) {
+            const char *start = "\033[200~";
+            const char *end = "\033[201~";
+            self.outputCb(start, (int)strlen(start), self.outputCtx);
+            self.outputCb(text, (int)strlen(text), self.outputCtx);
+            self.outputCb(end, (int)strlen(end), self.outputCtx);
+        } else {
+            self.outputCb(text, (int)strlen(text), self.outputCtx);
+        }
+        tt_mac_clipboard_free(text);
+    }
+}
+
+- (void)selectAll:(id)sender {
+    if (!_termbuf) return;
+    _selStartCol = 0;
+    _selStartRow = 0;
+    _selEndCol = termbuf_get_cols(_termbuf) - 1;
+    _selEndRow = termbuf_get_rows(_termbuf) - 1;
+    _hasSelection = YES;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)clearSelection {
+    _hasSelection = NO;
+    _selecting = NO;
+    [self setNeedsDisplay:YES];
 }
 
 - (termbuf_t *)termbuf {
@@ -806,6 +1021,48 @@ int tt_mac_messagebox(TTMacWindow parent, const char* text, const char* caption,
         if (response == NSAlertSecondButtonReturn) return 2; /* IDCANCEL / IDNO */
         if (response == NSAlertThirdButtonReturn)  return 7; /* IDNO (for YESNOCANCEL) */
         return 0;
+    }
+}
+
+/* --- Terminal View Extended API --- */
+
+termbuf_t *tt_mac_termview_get_termbuf(TTMacView v) {
+    if (!v) return NULL;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        return [view termbuf];
+    }
+}
+
+void tt_mac_termview_clear_selection(TTMacView v) {
+    if (!v) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        [view clearSelection];
+    }
+}
+
+void tt_mac_termview_select_all(TTMacView v) {
+    if (!v) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        [view selectAll:nil];
+    }
+}
+
+void tt_mac_termview_copy(TTMacView v) {
+    if (!v) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        [view copy:nil];
+    }
+}
+
+void tt_mac_termview_paste(TTMacView v) {
+    if (!v) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        [view paste:nil];
     }
 }
 

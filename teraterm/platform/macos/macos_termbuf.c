@@ -56,6 +56,33 @@ struct termbuf {
     int mode_autowrap;      /* Auto-wrap at end of line */
     int mode_origin;        /* Origin mode */
     int wrap_pending;       /* Next char should wrap */
+    int mode_insert;        /* Insert mode (IRM) */
+    int cursor_visible;     /* DECTCEM: cursor visible */
+    int cursor_shape;       /* 0=block, 1=beam, 2=underline */
+    int bracketed_paste;    /* Bracketed paste mode */
+    int mouse_mode;         /* Mouse tracking mode */
+    int mouse_encoding;     /* Mouse encoding (default/utf8/sgr) */
+
+    /* Alternate screen buffer */
+    termbuf_cell_t *alt_cells;
+    int alt_cx, alt_cy;
+    uint8_t alt_attr, alt_fg, alt_bg;
+    int on_alt_screen;
+
+    /* Scrollback buffer */
+    termbuf_cell_t *scrollback;
+    int scrollback_max;     /* max lines in scrollback */
+    int scrollback_count;   /* current number of scrollback lines */
+    int scrollback_head;    /* ring buffer head index */
+    int viewport_offset;    /* 0 = at bottom, >0 = scrolled up */
+
+    /* Callbacks */
+    termbuf_title_cb title_cb;
+    void *title_ctx;
+    termbuf_bell_cb bell_cb;
+    void *bell_ctx;
+    termbuf_log_cb log_cb;
+    void *log_ctx;
 };
 
 /* Default 256-color palette */
@@ -111,9 +138,31 @@ static void clear_region(termbuf_t *tb, int x1, int y1, int x2, int y2) {
     }
 }
 
+static void scrollback_push_line(termbuf_t *tb, int row) {
+    if (!tb->scrollback || tb->scrollback_max <= 0) return;
+    /* Copy screen row into scrollback ring buffer */
+    int idx = (tb->scrollback_head + tb->scrollback_count) % tb->scrollback_max;
+    if (tb->scrollback_count >= tb->scrollback_max) {
+        /* Buffer full, overwrite oldest */
+        tb->scrollback_head = (tb->scrollback_head + 1) % tb->scrollback_max;
+    } else {
+        tb->scrollback_count++;
+    }
+    memcpy(&tb->scrollback[idx * tb->cols],
+           &tb->cells[row * tb->cols],
+           tb->cols * sizeof(termbuf_cell_t));
+}
+
 static void scroll_up(termbuf_t *tb, int top, int bottom, int n) {
     if (n <= 0 || top >= bottom) return;
     if (n > bottom - top + 1) n = bottom - top + 1;
+
+    /* Save lines going off top into scrollback (only if scrolling the whole screen) */
+    if (top == 0 && !tb->on_alt_screen) {
+        for (int i = 0; i < n; i++) {
+            scrollback_push_line(tb, i);
+        }
+    }
 
     /* Move lines up */
     for (int y = top; y <= bottom - n; y++) {
@@ -156,6 +205,13 @@ static void put_char(termbuf_t *tb, uint32_t ch) {
         tb->wrap_pending = 0;
     }
 
+    /* Insert mode: shift characters right */
+    if (tb->mode_insert) {
+        for (int x = tb->cols - 1; x > tb->cx; x--) {
+            tb->cells[tb->cy * tb->cols + x] = tb->cells[tb->cy * tb->cols + x - 1];
+        }
+    }
+
     termbuf_cell_t *c = cell_at(tb, tb->cx, tb->cy);
     if (c) {
         c->ch = ch;
@@ -168,6 +224,11 @@ static void put_char(termbuf_t *tb, uint32_t ch) {
         tb->cx++;
     } else if (tb->mode_autowrap) {
         tb->wrap_pending = 1;
+    }
+
+    /* Auto-scroll to bottom on new output */
+    if (tb->viewport_offset > 0) {
+        tb->viewport_offset = 0;
     }
     tb->dirty = 1;
 }
@@ -374,18 +435,72 @@ static void handle_csi(termbuf_t *tb, char cmd) {
 
     case 'h': /* SM - Set Mode */
         if (tb->csi_private) {
+            for (int i = 0; i < tb->csi_nparam; i++) {
+                n = tb->csi_params[i];
+                switch (n) {
+                case 1: /* DECCKM - Application cursor keys (handled by keyboard) */ break;
+                case 6: tb->mode_origin = 1; break;
+                case 7: tb->mode_autowrap = 1; break;
+                case 25: tb->cursor_visible = 1; break; /* DECTCEM */
+                case 1000: tb->mouse_mode = TERMBUF_MOUSE_VT200; break;
+                case 1002: tb->mouse_mode = TERMBUF_MOUSE_BTN_EVENT; break;
+                case 1003: tb->mouse_mode = TERMBUF_MOUSE_ALL_EVENT; break;
+                case 1005: tb->mouse_encoding = TERMBUF_MOUSE_ENC_UTF8; break;
+                case 1006: tb->mouse_encoding = TERMBUF_MOUSE_ENC_SGR; break;
+                case 1049: /* Alt screen buffer + save cursor */
+                case 47: case 1047:
+                    if (!tb->on_alt_screen) {
+                        /* Save main screen */
+                        tb->alt_cx = tb->cx; tb->alt_cy = tb->cy;
+                        tb->alt_attr = tb->cur_attr; tb->alt_fg = tb->cur_fg; tb->alt_bg = tb->cur_bg;
+                        if (!tb->alt_cells)
+                            tb->alt_cells = calloc(tb->cols * tb->rows, sizeof(termbuf_cell_t));
+                        if (tb->alt_cells) {
+                            memcpy(tb->alt_cells, tb->cells, tb->cols * tb->rows * sizeof(termbuf_cell_t));
+                            /* Clear screen for alt buffer */
+                            clear_region(tb, 0, 0, tb->cols - 1, tb->rows - 1);
+                            if (n == 1049) { tb->cx = 0; tb->cy = 0; }
+                            tb->on_alt_screen = 1;
+                        }
+                    }
+                    break;
+                case 2004: tb->bracketed_paste = 1; break;
+                }
+            }
+        } else {
             n = csi_param(tb, 0, 0);
-            if (n == 7) tb->mode_autowrap = 1;
-            if (n == 6) tb->mode_origin = 1;
-            /* ?25: show cursor, ?1049: alt screen - ignored for now */
+            if (n == 4) tb->mode_insert = 1; /* IRM */
         }
         break;
 
     case 'l': /* RM - Reset Mode */
         if (tb->csi_private) {
+            for (int i = 0; i < tb->csi_nparam; i++) {
+                n = tb->csi_params[i];
+                switch (n) {
+                case 1: break;
+                case 6: tb->mode_origin = 0; break;
+                case 7: tb->mode_autowrap = 0; break;
+                case 25: tb->cursor_visible = 0; break;
+                case 1000: case 1002: case 1003: tb->mouse_mode = TERMBUF_MOUSE_NONE; break;
+                case 1005: case 1006: tb->mouse_encoding = TERMBUF_MOUSE_ENC_DEFAULT; break;
+                case 1049: case 47: case 1047:
+                    if (tb->on_alt_screen && tb->alt_cells) {
+                        /* Restore main screen */
+                        memcpy(tb->cells, tb->alt_cells, tb->cols * tb->rows * sizeof(termbuf_cell_t));
+                        if (n == 1049) {
+                            tb->cx = tb->alt_cx; tb->cy = tb->alt_cy;
+                            tb->cur_attr = tb->alt_attr; tb->cur_fg = tb->alt_fg; tb->cur_bg = tb->alt_bg;
+                        }
+                        tb->on_alt_screen = 0;
+                    }
+                    break;
+                case 2004: tb->bracketed_paste = 0; break;
+                }
+            }
+        } else {
             n = csi_param(tb, 0, 0);
-            if (n == 7) tb->mode_autowrap = 0;
-            if (n == 6) tb->mode_origin = 0;
+            if (n == 4) tb->mode_insert = 0;
         }
         break;
 
@@ -426,6 +541,26 @@ static void handle_csi(termbuf_t *tb, char cmd) {
         clear_region(tb, tb->cx, tb->cy, tb->cx + n - 1, tb->cy);
         break;
 
+    case 'c': /* DA - Device Attributes */
+        if (tb->csi_private == 0 && tb->output_cb) {
+            /* Primary DA: report VT220 */
+            const char *resp = "\033[?62;1;2;6;7;8;9c";
+            tb->output_cb(resp, (int)strlen(resp), tb->output_ctx);
+        }
+        break;
+
+    case 'q': /* DECSCUSR - Set Cursor Style (CSI Ps SP q) */
+        /* Note: 'q' with space intermediate - we handle it loosely */
+        n = csi_param(tb, 0, 1);
+        if (n <= 2) tb->cursor_shape = TERMBUF_CURSOR_BLOCK;
+        else if (n <= 4) tb->cursor_shape = TERMBUF_CURSOR_UNDERLINE;
+        else tb->cursor_shape = TERMBUF_CURSOR_BEAM;
+        break;
+
+    case 't': /* Window manipulation (xterm) */
+        /* Ignore most, but handle size queries */
+        break;
+
     default:
         /* Unknown CSI sequence - ignore */
         break;
@@ -455,7 +590,8 @@ static void process_byte(termbuf_t *tb, unsigned char ch) {
             tb->cx = next;
             tb->wrap_pending = 0;
         } else if (ch == '\a') {
-            /* Bell - ignore */
+            /* Bell */
+            if (tb->bell_cb) tb->bell_cb(tb->bell_ctx);
         } else if (ch == 0x0E || ch == 0x0F) {
             /* SI/SO - character set shift, ignore */
         } else if (ch >= 0x20) {
@@ -575,9 +711,13 @@ static void process_byte(termbuf_t *tb, unsigned char ch) {
 
     case ST_OSC:
         if (ch >= '0' && ch <= '9') {
-            /* OSC parameter number */
+            /* Store OSC number as first bytes */
+            if (tb->osc_len < MAX_OSC_LEN - 1)
+                tb->osc_buf[tb->osc_len++] = ch;
             tb->state = ST_OSC_STRING;
         } else if (ch == ';') {
+            if (tb->osc_len < MAX_OSC_LEN - 1)
+                tb->osc_buf[tb->osc_len++] = ch;
             tb->state = ST_OSC_STRING;
         } else {
             tb->state = ST_NORMAL;
@@ -586,13 +726,25 @@ static void process_byte(termbuf_t *tb, unsigned char ch) {
 
     case ST_OSC_STRING:
         if (ch == '\a' || ch == '\033') {
-            /* End of OSC string - ignore the content */
+            /* End of OSC string */
+            tb->osc_buf[tb->osc_len] = '\0';
+            /* Parse OSC: "N;string" where N is the OSC number */
+            char *semi = strchr(tb->osc_buf, ';');
+            if (semi) {
+                int osc_num = atoi(tb->osc_buf);
+                char *osc_str = semi + 1;
+                if ((osc_num == 0 || osc_num == 2) && tb->title_cb) {
+                    tb->title_cb(osc_str, tb->title_ctx);
+                }
+            }
             if (ch == '\033') {
-                /* Might be followed by \\ (ST), just go to normal */
+                /* Might be followed by \\ (ST) - consume it */
             }
             tb->state = ST_NORMAL;
+        } else {
+            if (tb->osc_len < MAX_OSC_LEN - 1)
+                tb->osc_buf[tb->osc_len++] = ch;
         }
-        /* Otherwise accumulate (we ignore OSC content for now) */
         break;
 
     case ST_CHARSET:
@@ -670,7 +822,13 @@ termbuf_t *termbuf_create(int cols, int rows) {
     tb->scroll_top = 0;
     tb->scroll_bottom = rows - 1;
     tb->mode_autowrap = 1;
+    tb->cursor_visible = 1;
+    tb->cursor_shape = TERMBUF_CURSOR_BLOCK;
     tb->dirty = 1;
+
+    /* Scrollback: default 10000 lines */
+    tb->scrollback_max = 10000;
+    tb->scrollback = calloc(tb->scrollback_max * cols, sizeof(termbuf_cell_t));
 
     clear_region(tb, 0, 0, cols - 1, rows - 1);
     return tb;
@@ -679,11 +837,15 @@ termbuf_t *termbuf_create(int cols, int rows) {
 void termbuf_destroy(termbuf_t *tb) {
     if (!tb) return;
     free(tb->cells);
+    free(tb->alt_cells);
+    free(tb->scrollback);
     free(tb);
 }
 
 void termbuf_write(termbuf_t *tb, const char *data, int len) {
     if (!tb || !data || len <= 0) return;
+    /* Log raw data if callback set */
+    if (tb->log_cb) tb->log_cb(data, len, tb->log_ctx);
     process_data(tb, data, len);
 }
 
@@ -727,11 +889,253 @@ void termbuf_resize(termbuf_t *tb, int cols, int rows) {
 
     free(tb->cells);
     tb->cells = new_cells;
+
+    /* Resize alt screen if it exists */
+    if (tb->alt_cells) {
+        termbuf_cell_t *new_alt = calloc(cols * rows, sizeof(termbuf_cell_t));
+        if (new_alt) {
+            for (int y = 0; y < copy_rows; y++) {
+                memcpy(&new_alt[y * cols], &tb->alt_cells[y * tb->cols],
+                       copy_cols * sizeof(termbuf_cell_t));
+            }
+            free(tb->alt_cells);
+            tb->alt_cells = new_alt;
+        }
+    }
+
+    /* Reallocate scrollback for new column width */
+    if (tb->scrollback && cols != tb->cols) {
+        termbuf_cell_t *new_sb = calloc(tb->scrollback_max * cols, sizeof(termbuf_cell_t));
+        if (new_sb) {
+            /* Copy what fits */
+            int copy_sb_cols = (cols < tb->cols) ? cols : tb->cols;
+            for (int i = 0; i < tb->scrollback_count; i++) {
+                int old_idx = (tb->scrollback_head + i) % tb->scrollback_max;
+                memcpy(&new_sb[i * cols],
+                       &tb->scrollback[old_idx * tb->cols],
+                       copy_sb_cols * sizeof(termbuf_cell_t));
+            }
+            free(tb->scrollback);
+            tb->scrollback = new_sb;
+            tb->scrollback_head = 0;
+        }
+    }
+
     tb->cols = cols;
     tb->rows = rows;
     tb->scroll_top = 0;
     tb->scroll_bottom = rows - 1;
     if (tb->cx >= cols) tb->cx = cols - 1;
     if (tb->cy >= rows) tb->cy = rows - 1;
+    tb->viewport_offset = 0;
     tb->dirty = 1;
+}
+
+/* --- Scrollback public API --- */
+
+int termbuf_scrollback_lines(const termbuf_t *tb) {
+    return tb ? tb->scrollback_count : 0;
+}
+
+const termbuf_cell_t *termbuf_get_scrollback_cell(const termbuf_t *tb, int col, int line) {
+    if (!tb || !tb->scrollback || col < 0 || col >= tb->cols ||
+        line < 0 || line >= tb->scrollback_count) return NULL;
+    /* line 0 = oldest, line scrollback_count-1 = most recent */
+    int idx = (tb->scrollback_head + line) % tb->scrollback_max;
+    return &tb->scrollback[idx * tb->cols + col];
+}
+
+void termbuf_set_scrollback_size(termbuf_t *tb, int max_lines) {
+    if (!tb || max_lines < 0) return;
+    /* Simplified: just change max, reallocate */
+    free(tb->scrollback);
+    tb->scrollback_max = max_lines;
+    tb->scrollback_count = 0;
+    tb->scrollback_head = 0;
+    if (max_lines > 0) {
+        tb->scrollback = calloc(max_lines * tb->cols, sizeof(termbuf_cell_t));
+    } else {
+        tb->scrollback = NULL;
+    }
+}
+
+void termbuf_scroll_viewport(termbuf_t *tb, int delta) {
+    if (!tb) return;
+    tb->viewport_offset += delta;
+    if (tb->viewport_offset < 0) tb->viewport_offset = 0;
+    if (tb->viewport_offset > tb->scrollback_count)
+        tb->viewport_offset = tb->scrollback_count;
+    tb->dirty = 1;
+}
+
+int termbuf_get_viewport_offset(const termbuf_t *tb) {
+    return tb ? tb->viewport_offset : 0;
+}
+
+void termbuf_scroll_to_bottom(termbuf_t *tb) {
+    if (!tb) return;
+    tb->viewport_offset = 0;
+    tb->dirty = 1;
+}
+
+/* --- Text extraction --- */
+
+char *termbuf_get_text(const termbuf_t *tb, int col1, int row1, int col2, int row2) {
+    if (!tb) return NULL;
+    /* Normalize: ensure row1 <= row2 */
+    if (row1 > row2 || (row1 == row2 && col1 > col2)) {
+        int tc = col1, tr = row1;
+        col1 = col2; row1 = row2;
+        col2 = tc; row2 = tr;
+    }
+
+    /* Allocate generous buffer (4 bytes per char for UTF-8 + newlines) */
+    int max_chars = (row2 - row1 + 1) * (tb->cols + 1);
+    char *buf = malloc(max_chars * 4 + 1);
+    if (!buf) return NULL;
+
+    int pos = 0;
+    for (int row = row1; row <= row2 && row < tb->rows; row++) {
+        int start_col = (row == row1) ? col1 : 0;
+        int end_col = (row == row2) ? col2 : tb->cols - 1;
+        if (start_col < 0) start_col = 0;
+        if (end_col >= tb->cols) end_col = tb->cols - 1;
+
+        /* Find last non-blank char in this row segment for trimming */
+        int last_nonblank = start_col - 1;
+        for (int c = end_col; c >= start_col; c--) {
+            const termbuf_cell_t *cell = termbuf_get_cell(tb, c, row);
+            if (cell && cell->ch != 0 && cell->ch != ' ') {
+                last_nonblank = c;
+                break;
+            }
+        }
+
+        for (int c = start_col; c <= last_nonblank; c++) {
+            const termbuf_cell_t *cell = termbuf_get_cell(tb, c, row);
+            uint32_t ch = (cell && cell->ch) ? cell->ch : ' ';
+            /* Encode as UTF-8 */
+            if (ch < 0x80) {
+                buf[pos++] = (char)ch;
+            } else if (ch < 0x800) {
+                buf[pos++] = 0xC0 | (ch >> 6);
+                buf[pos++] = 0x80 | (ch & 0x3F);
+            } else if (ch < 0x10000) {
+                buf[pos++] = 0xE0 | (ch >> 12);
+                buf[pos++] = 0x80 | ((ch >> 6) & 0x3F);
+                buf[pos++] = 0x80 | (ch & 0x3F);
+            } else {
+                buf[pos++] = 0xF0 | (ch >> 18);
+                buf[pos++] = 0x80 | ((ch >> 12) & 0x3F);
+                buf[pos++] = 0x80 | ((ch >> 6) & 0x3F);
+                buf[pos++] = 0x80 | (ch & 0x3F);
+            }
+        }
+        if (row < row2) buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+char *termbuf_get_all_text(const termbuf_t *tb) {
+    if (!tb) return NULL;
+    return termbuf_get_text(tb, 0, 0, tb->cols - 1, tb->rows - 1);
+}
+
+/* --- Clear / Reset --- */
+
+void termbuf_clear_screen(termbuf_t *tb) {
+    if (!tb) return;
+    clear_region(tb, 0, 0, tb->cols - 1, tb->rows - 1);
+    tb->cx = 0; tb->cy = 0;
+    tb->dirty = 1;
+}
+
+void termbuf_clear_buffer(termbuf_t *tb) {
+    if (!tb) return;
+    termbuf_clear_screen(tb);
+    tb->scrollback_count = 0;
+    tb->scrollback_head = 0;
+    tb->viewport_offset = 0;
+}
+
+void termbuf_reset(termbuf_t *tb) {
+    if (!tb) return;
+    termbuf_clear_buffer(tb);
+    tb->cur_attr = 0;
+    tb->cur_fg = 7;
+    tb->cur_bg = 0;
+    tb->scroll_top = 0;
+    tb->scroll_bottom = tb->rows - 1;
+    tb->mode_autowrap = 1;
+    tb->mode_origin = 0;
+    tb->mode_insert = 0;
+    tb->cursor_visible = 1;
+    tb->cursor_shape = TERMBUF_CURSOR_BLOCK;
+    tb->bracketed_paste = 0;
+    tb->mouse_mode = TERMBUF_MOUSE_NONE;
+    tb->mouse_encoding = TERMBUF_MOUSE_ENC_DEFAULT;
+    tb->on_alt_screen = 0;
+    free(tb->alt_cells);
+    tb->alt_cells = NULL;
+    tb->state = ST_NORMAL;
+}
+
+/* --- Query modes --- */
+
+int termbuf_get_cursor_shape(const termbuf_t *tb) { return tb ? tb->cursor_shape : 0; }
+int termbuf_get_mouse_mode(const termbuf_t *tb) { return tb ? tb->mouse_mode : 0; }
+int termbuf_get_mouse_encoding(const termbuf_t *tb) { return tb ? tb->mouse_encoding : 0; }
+int termbuf_get_bracketed_paste(const termbuf_t *tb) { return tb ? tb->bracketed_paste : 0; }
+int termbuf_is_alt_screen(const termbuf_t *tb) { return tb ? tb->on_alt_screen : 0; }
+int termbuf_get_cursor_visible(const termbuf_t *tb) { return tb ? tb->cursor_visible : 1; }
+
+/* --- Mouse event reporting --- */
+
+void termbuf_report_mouse(termbuf_t *tb, int button, int x, int y, int pressed, int modifiers) {
+    if (!tb || !tb->output_cb || tb->mouse_mode == TERMBUF_MOUSE_NONE) return;
+
+    char buf[32];
+    int len = 0;
+
+    if (tb->mouse_encoding == TERMBUF_MOUSE_ENC_SGR) {
+        /* SGR encoding: ESC [ < Pb ; Px ; Py M/m */
+        int cb = button;
+        if (modifiers & 1) cb |= 4;  /* shift */
+        if (modifiers & 2) cb |= 8;  /* meta/alt */
+        if (modifiers & 4) cb |= 16; /* ctrl */
+        len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
+                       cb, x + 1, y + 1, pressed ? 'M' : 'm');
+    } else {
+        /* Default encoding */
+        int cb = button + 32;
+        if (!pressed) cb = 35; /* release */
+        if (modifiers & 1) cb |= 4;
+        if (modifiers & 2) cb |= 8;
+        if (modifiers & 4) cb |= 16;
+        len = snprintf(buf, sizeof(buf), "\033[M%c%c%c",
+                       cb, x + 33, y + 33);
+    }
+
+    if (len > 0) tb->output_cb(buf, len, tb->output_ctx);
+}
+
+/* --- Callback setters --- */
+
+void termbuf_set_title_cb(termbuf_t *tb, termbuf_title_cb cb, void *ctx) {
+    if (!tb) return;
+    tb->title_cb = cb;
+    tb->title_ctx = ctx;
+}
+
+void termbuf_set_bell_cb(termbuf_t *tb, termbuf_bell_cb cb, void *ctx) {
+    if (!tb) return;
+    tb->bell_cb = cb;
+    tb->bell_ctx = ctx;
+}
+
+void termbuf_set_log_cb(termbuf_t *tb, termbuf_log_cb cb, void *ctx) {
+    if (!tb) return;
+    tb->log_cb = cb;
+    tb->log_ctx = ctx;
 }

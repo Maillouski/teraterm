@@ -85,6 +85,13 @@ int tt_mac_messagebox(TTMacWindow parent, const char* text, const char* caption,
 char* tt_mac_open_file_dialog(TTMacWindow parent, const char* filter, const char* initial_dir);
 char* tt_mac_save_file_dialog(TTMacWindow parent, const char* filter, const char* initial_dir);
 
+/* Terminal view extended API */
+termbuf_t *tt_mac_termview_get_termbuf(TTMacView view);
+void tt_mac_termview_clear_selection(TTMacView view);
+void tt_mac_termview_select_all(TTMacView view);
+void tt_mac_termview_copy(TTMacView view);
+void tt_mac_termview_paste(TTMacView view);
+
 #ifdef __cplusplus
 }
 #endif
