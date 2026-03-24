@@ -470,7 +470,7 @@ typedef struct _DEVPROPKEY {
 #define MB_ICONEXCLAMATION  0x00000030L
 #define MB_ICONINFORMATION  0x00000040L
 #define MB_ICONQUESTION     0x00000020L
-#define MAKEINTRESOURCE(i)  ((LPCSTR)(ULONG_PTR)(WORD)(i))
+#define MAKEINTRESOURCE(i)  ((LPCWSTR)(ULONG_PTR)(WORD)(i))
 
 /* --- Secure string macros --- */
 #ifndef _TRUNCATE
