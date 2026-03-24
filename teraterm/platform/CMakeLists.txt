@@ -21,6 +21,8 @@ if(APPLE)
     macos/macos_net.c
     macos/macos_pty.h
     macos/macos_pty.c
+    macos/macos_termbuf.h
+    macos/macos_termbuf.c
   )
 
   target_include_directories(

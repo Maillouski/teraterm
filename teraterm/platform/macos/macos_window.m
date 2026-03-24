@@ -7,6 +7,7 @@
 
 #import <Cocoa/Cocoa.h>
 #include "macos_window.h"
+#include "macos_termbuf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -21,11 +22,32 @@ static NSString* nsstring_from_wchar(const wchar_t* wstr) {
                                   encoding:NSUTF32LittleEndianStringEncoding];
 }
 
+/* COLORREF (0x00BBGGRR) to NSColor */
+static NSColor* color_from_index(int index, int bold) {
+    uint32_t rgb = termbuf_default_color(index);
+    /* If bold and standard color (0-7), brighten */
+    if (bold && index < 8) {
+        rgb = termbuf_default_color(index + 8);
+    }
+    CGFloat r = ((rgb >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((rgb >> 8)  & 0xFF) / 255.0;
+    CGFloat b = ((rgb >> 0)  & 0xFF) / 255.0;
+    return [NSColor colorWithCalibratedRed:r green:g blue:b alpha:1.0];
+}
+
 /* --- Terminal View (custom NSView) --- */
-@interface TTTerminalView : NSView
+@interface TTTerminalView : NSView {
+    termbuf_t *_termbuf;
+    int _charWidth;
+    int _charHeight;
+    int _fontAscent;
+}
 @property (nonatomic, strong) NSFont *termFont;
+@property (nonatomic, strong) NSFont *termFontBold;
 @property (nonatomic, strong) NSColor *fgColor;
 @property (nonatomic, strong) NSColor *bgColor;
+@property (nonatomic, assign) void (*outputCb)(const char*, int, void*);
+@property (nonatomic, assign) void *outputCtx;
 @end
 
 @implementation TTTerminalView
@@ -34,10 +56,36 @@ static NSString* nsstring_from_wchar(const wchar_t* wstr) {
     self = [super initWithFrame:frame];
     if (self) {
         _termFont = [NSFont fontWithName:@"Menlo" size:14.0];
+        _termFontBold = [[NSFontManager sharedFontManager] convertFont:_termFont toHaveTrait:NSBoldFontMask];
+        if (!_termFontBold) _termFontBold = _termFont;
         _fgColor = [NSColor whiteColor];
         _bgColor = [NSColor blackColor];
+        _outputCb = NULL;
+        _outputCtx = NULL;
+
+        /* Calculate font metrics */
+        [self updateFontMetrics];
+
+        /* Create terminal buffer based on view size */
+        int cols = (int)(frame.size.width / _charWidth);
+        int rows = (int)(frame.size.height / _charHeight);
+        if (cols < 1) cols = 80;
+        if (rows < 1) rows = 24;
+        _termbuf = termbuf_create(cols, rows);
     }
     return self;
+}
+
+- (void)dealloc {
+    if (_termbuf) termbuf_destroy(_termbuf);
+}
+
+- (void)updateFontMetrics {
+    NSDictionary *attrs = @{NSFontAttributeName: _termFont};
+    NSSize charSize = [@"W" sizeWithAttributes:attrs];
+    _charWidth = (int)ceil(charSize.width);
+    _charHeight = (int)ceil(_termFont.ascender - _termFont.descender + _termFont.leading);
+    _fontAscent = (int)ceil(_termFont.ascender);
 }
 
 - (BOOL)isFlipped {
@@ -49,13 +97,156 @@ static NSString* nsstring_from_wchar(const wchar_t* wstr) {
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
+    if (!_termbuf) {
+        [self.bgColor setFill];
+        NSRectFill(dirtyRect);
+        return;
+    }
+
+    int cols = termbuf_get_cols(_termbuf);
+    int rows = termbuf_get_rows(_termbuf);
+    int cx, cy;
+    termbuf_get_cursor(_termbuf, &cx, &cy);
+
+    /* Calculate visible row range from dirty rect */
+    int startRow = (int)(dirtyRect.origin.y / _charHeight);
+    int endRow = (int)((dirtyRect.origin.y + dirtyRect.size.height) / _charHeight) + 1;
+    if (startRow < 0) startRow = 0;
+    if (endRow > rows) endRow = rows;
+
+    /* Fill background */
     [self.bgColor setFill];
     NSRectFill(dirtyRect);
+
+    /* Draw each cell */
+    for (int row = startRow; row < endRow; row++) {
+        /* Batch consecutive cells with same attributes for efficiency */
+        int col = 0;
+        while (col < cols) {
+            const termbuf_cell_t *cell = termbuf_get_cell(_termbuf, col, row);
+            if (!cell) { col++; continue; }
+
+            /* Collect run of same-attribute cells */
+            uint8_t attr = cell->attr;
+            uint8_t fg_idx = cell->fg;
+            uint8_t bg_idx = cell->bg;
+            int run_start = col;
+            unichar run_chars[256];
+            int run_len = 0;
+
+            while (col < cols && run_len < 255) {
+                cell = termbuf_get_cell(_termbuf, col, row);
+                if (!cell) break;
+                if (col > run_start && (cell->attr != attr || cell->fg != fg_idx || cell->bg != bg_idx)) {
+                    break;
+                }
+                uint32_t ch = cell->ch;
+                if (ch == 0 || ch == ' ') ch = ' ';
+                /* Handle BMP characters; surrogates for >0xFFFF not handled yet */
+                run_chars[run_len++] = (ch > 0xFFFF) ? 0xFFFD : (unichar)ch;
+                col++;
+            }
+
+            if (run_len == 0) continue;
+
+            int is_bold = (attr & TERMBUF_ATTR_BOLD) != 0;
+            int is_reverse = (attr & TERMBUF_ATTR_REVERSE) != 0;
+            int is_underline = (attr & TERMBUF_ATTR_UNDERLINE) != 0;
+
+            int draw_fg = is_reverse ? bg_idx : fg_idx;
+            int draw_bg = is_reverse ? fg_idx : bg_idx;
+
+            /* Draw background if non-default */
+            NSColor *bgColor_cell = color_from_index(draw_bg, 0);
+            if (draw_bg != 0 || is_reverse) {
+                [bgColor_cell setFill];
+                NSRectFill(NSMakeRect(run_start * _charWidth, row * _charHeight,
+                                      run_len * _charWidth, _charHeight));
+            }
+
+            /* Draw text */
+            NSFont *font = is_bold ? _termFontBold : _termFont;
+            NSColor *fgColor_cell = color_from_index(draw_fg, is_bold);
+
+            NSMutableDictionary *attrs_dict = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                font, NSFontAttributeName,
+                fgColor_cell, NSForegroundColorAttributeName,
+                nil];
+            if (is_underline) {
+                [attrs_dict setObject:@(NSUnderlineStyleSingle) forKey:NSUnderlineStyleAttributeName];
+            }
+
+            NSString *str = [NSString stringWithCharacters:run_chars length:run_len];
+            [str drawAtPoint:NSMakePoint(run_start * _charWidth,
+                                         row * _charHeight + (_charHeight - _fontAscent - (int)ceil(-_termFont.descender)) / 2)
+              withAttributes:attrs_dict];
+        }
+    }
+
+    /* Draw cursor (block cursor) */
+    if (cx >= 0 && cx < cols && cy >= startRow && cy < endRow) {
+        NSRect cursorRect = NSMakeRect(cx * _charWidth, cy * _charHeight,
+                                        _charWidth, _charHeight);
+        [[NSColor colorWithCalibratedWhite:0.7 alpha:0.5] setFill];
+        NSRectFillUsingOperation(cursorRect, NSCompositingOperationSourceOver);
+        [[NSColor colorWithCalibratedWhite:0.8 alpha:0.8] setStroke];
+        NSFrameRect(cursorRect);
+    }
+
+    termbuf_clear_dirty(_termbuf);
+}
+
+- (void)viewDidEndLiveResize {
+    [super viewDidEndLiveResize];
+    if (_termbuf && _charWidth > 0 && _charHeight > 0) {
+        NSRect bounds = self.bounds;
+        int cols = (int)(bounds.size.width / _charWidth);
+        int rows = (int)(bounds.size.height / _charHeight);
+        if (cols < 1) cols = 1;
+        if (rows < 1) rows = 1;
+        termbuf_resize(_termbuf, cols, rows);
+        [self setNeedsDisplay:YES];
+    }
 }
 
 - (void)keyDown:(NSEvent *)event {
-    /* TODO: Forward to terminal input handler */
-    [self interpretKeyEvents:@[event]];
+    NSString *chars = event.characters;
+    if (!chars.length) return;
+
+    /* Handle special keys */
+    unichar ch = [chars characterAtIndex:0];
+    const char *seq = NULL;
+
+    switch (ch) {
+    case NSUpArrowFunctionKey:    seq = "\033[A"; break;
+    case NSDownArrowFunctionKey:  seq = "\033[B"; break;
+    case NSRightArrowFunctionKey: seq = "\033[C"; break;
+    case NSLeftArrowFunctionKey:  seq = "\033[D"; break;
+    case NSHomeFunctionKey:       seq = "\033[H"; break;
+    case NSEndFunctionKey:        seq = "\033[F"; break;
+    case NSPageUpFunctionKey:     seq = "\033[5~"; break;
+    case NSPageDownFunctionKey:   seq = "\033[6~"; break;
+    case NSDeleteFunctionKey:     seq = "\033[3~"; break;
+    case NSF1FunctionKey:         seq = "\033OP"; break;
+    case NSF2FunctionKey:         seq = "\033OQ"; break;
+    case NSF3FunctionKey:         seq = "\033OR"; break;
+    case NSF4FunctionKey:         seq = "\033OS"; break;
+    default: break;
+    }
+
+    if (seq && self.outputCb) {
+        self.outputCb(seq, (int)strlen(seq), self.outputCtx);
+    } else if (ch < 0xF700 && self.outputCb) {
+        /* Normal character - send as UTF-8 */
+        const char *utf8 = [chars UTF8String];
+        if (utf8) {
+            self.outputCb(utf8, (int)strlen(utf8), self.outputCtx);
+        }
+    }
+}
+
+- (termbuf_t *)termbuf {
+    return _termbuf;
 }
 
 @end
@@ -249,6 +440,33 @@ void tt_mac_termview_scroll(TTMacView v, int lines) {
         TTTerminalView* view = (__bridge TTTerminalView*)v;
         /* TODO: implement scrollback */
         [view setNeedsDisplay:YES];
+    }
+}
+
+void tt_mac_termview_write(TTMacView v, const char *data, int len) {
+    if (!v || !data || len <= 0) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        termbuf_t *tb = [view termbuf];
+        if (tb) {
+            termbuf_write(tb, data, len);
+            if (termbuf_is_dirty(tb)) {
+                [view setNeedsDisplay:YES];
+            }
+        }
+    }
+}
+
+void tt_mac_termview_set_output_cb(TTMacView v, void (*cb)(const char*, int, void*), void *ctx) {
+    if (!v) return;
+    @autoreleasepool {
+        TTTerminalView* view = (__bridge TTTerminalView*)v;
+        view.outputCb = cb;
+        view.outputCtx = ctx;
+        termbuf_t *tb = [view termbuf];
+        if (tb) {
+            termbuf_set_output_cb(tb, cb, ctx);
+        }
     }
 }
 
